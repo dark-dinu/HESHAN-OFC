@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const pino = require("pino");
+const mongoose = require("mongoose");
 const { 
   makeWASocket, 
   DisconnectReason, 
@@ -21,26 +22,62 @@ const commands = new Map();
 const aliases = new Map();
 let sock = null;
 
-// Plugins Auto-loader
-const pluginsPath = path.join(__dirname, "plugins");
-if (fs.existsSync(pluginsPath)) {
-  const files = fs.readdirSync(pluginsPath).filter((f) => f.endsWith(".js"));
-  for (const file of files) {
-    try {
-      const cmd = require(path.join(pluginsPath, file));
-      if (cmd.name && cmd.execute) {
-        commands.set(cmd.name.toLowerCase(), cmd);
-        if (cmd.aliases && Array.isArray(cmd.aliases)) {
-          cmd.aliases.forEach(alias => aliases.set(alias.toLowerCase(), cmd));
-        }
-      }
-    } catch (e) {
-      console.error(`Error loading plugin ${file}:`, e.message);
-    }
+// ==========================================
+// 1. Status Settings Database Model
+// ==========================================
+const StatusSchema = new mongoose.Schema({
+  id: { type: String, default: "status_config", unique: true },
+  autoRead: { type: Boolean, default: false },
+  autoReact: { type: Boolean, default: false },
+  emoji: { type: String, default: "🥰" }
+});
+
+const StatusModel = mongoose.models.StatusSettings || mongoose.model("StatusSettings", StatusSchema);
+
+async function getStatusConfig() {
+  try {
+    let conf = await StatusModel.findOne({ id: "status_config" });
+    if (!conf) conf = await StatusModel.create({ id: "status_config" });
+    return conf;
+  } catch (e) {
+    return { autoRead: false, autoReact: false, emoji: "🥰" };
   }
 }
 
-// Pairing Dashboard
+// Global Memory Cache for Status Saver
+global.statusCache = new Map();
+
+// ==========================================
+// 2. Plugins Auto-Loader (C++ Modular Structure)
+// ==========================================
+function loadPlugins() {
+  commands.clear();
+  aliases.clear();
+  const pluginsPath = path.join(__dirname, "plugins");
+  
+  if (fs.existsSync(pluginsPath)) {
+    const files = fs.readdirSync(pluginsPath).filter((f) => f.endsWith(".js"));
+    for (const file of files) {
+      try {
+        delete require.cache[require.resolve(path.join(pluginsPath, file))];
+        const cmd = require(path.join(pluginsPath, file));
+        if (cmd.name && cmd.execute) {
+          commands.set(cmd.name.toLowerCase(), cmd);
+          if (cmd.aliases && Array.isArray(cmd.aliases)) {
+            cmd.aliases.forEach(alias => aliases.set(alias.toLowerCase(), cmd));
+          }
+        }
+      } catch (err) {
+        console.error(`[Plugin Error] ${file}:`, err.message);
+      }
+    }
+    console.log(`Loaded ${commands.size} plugins successfully.`);
+  }
+}
+
+// ==========================================
+// 3. Web UI Pairing Dashboard
+// ==========================================
 app.get("/", (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -61,7 +98,7 @@ app.get("/", (req, res) => {
     <body>
       <div class="box">
         <h1>𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂</h1>
-        <p style="color:#8b949e;font-size:0.85rem;margin-bottom:20px;">Private System Link</p>
+        <p style="color:#8b949e;font-size:0.85rem;margin-bottom:20px;">System Link Portal</p>
         <input type="password" id="key" placeholder="Enter Secret Key" required />
         <input type="text" id="phone" placeholder="947xxxxxxxx" required />
         <button id="btn" onclick="fetchCode()">Pair WhatsApp</button>
@@ -125,19 +162,11 @@ app.get("/get-code", async (req, res) => {
   }
 });
 
-// Event Handler
+// ==========================================
+// 4. Main Event Engine
+// ==========================================
 function initEvents(waSock, saveCreds) {
   waSock.ev.on("creds.update", saveCreds);
-
-  // Status background service start එක (One time only)
-  try {
-    const statusPlugin = require("./plugins/status");
-    if (statusPlugin && statusPlugin.startWatcher) {
-      statusPlugin.startWatcher(waSock);
-    }
-  } catch (e) {
-    console.error("Status watcher init error:", e.message);
-  }
 
   waSock.ev.on("connection.update", (update) => {
     const { connection, lastDisconnect } = update;
@@ -147,19 +176,51 @@ function initEvents(waSock, saveCreds) {
         startBot();
       }
     } else if (connection === "open") {
-      console.log(`${config.BOT_NAME} Connected Successfully 🟢`);
+      console.log(`⚡ ${config.BOT_NAME} Connected & Operational 🟢`);
     }
   });
 
   waSock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
     const msg = messages[0];
-    if (!msg?.message) return;
+    if (!msg || !msg.message || !msg.key) return;
 
     const from = msg.key.remoteJid;
-    if (from === "status@broadcast") return; // Handled separately in status.js
 
-    const isGroup = from.endsWith("@g.us");
+    // --- A. Status Updates (Auto Seen & React) ---
+    if (from === "status@broadcast") {
+      const statusId = msg.key.id;
+      if (statusId) {
+        global.statusCache.set(statusId, msg);
+        setTimeout(() => global.statusCache.delete(statusId), 12 * 60 * 60 * 1000);
+      }
+
+      if (msg.key.fromMe) return;
+
+      try {
+        const conf = await getStatusConfig();
+        
+        // Auto Read Status
+        if (conf.autoRead) {
+          await waSock.readMessages([msg.key]);
+        }
+
+        // Auto React Status
+        if (conf.autoReact && conf.emoji && statusId) {
+          const participant = msg.key.participant;
+          if (participant) {
+            await waSock.sendMessage(
+              "status@broadcast",
+              { react: { text: conf.emoji, key: msg.key } },
+              { statusJidList: [participant] }
+            );
+          }
+        }
+      } catch (err) {}
+      return;
+    }
+
+    // --- B. Message & Command Execution ---
     const rawSender = msg.key.fromMe 
       ? config.OWNER_NUMBER 
       : (msg.key.participant || from || "");
@@ -167,49 +228,69 @@ function initEvents(waSock, saveCreds) {
     const ownerClean = config.OWNER_NUMBER.replace(/[^0-9]/g, "");
     const isOwner = msg.key.fromMe || sender === ownerClean;
 
-    if (!isOwner) return;
-
-    const messageType = Object.keys(msg.message)[0];
+    const mType = Object.keys(msg.message)[0];
     const body = (
       msg.message.conversation ||
       msg.message.extendedTextMessage?.text ||
-      msg.message[messageType]?.caption ||
+      msg.message[mType]?.caption ||
       ""
     ).trim();
 
+    // Check Trigger without prefix (For Status Saver: oni, ewanna)
+    const lowerBody = body.toLowerCase();
+    const saveTriggers = ["oni", "ona", "ewanna", "evanna", "denna", "send", "save", "dapan", "ewapan"];
+    const isSaverTrigger = saveTriggers.some(t => lowerBody === t || lowerBody.startsWith(t + " "));
+
+    if (isSaverTrigger) {
+      const statusCmd = commands.get("status_saver");
+      if (statusCmd) {
+        try {
+          await statusCmd.execute({ sock: waSock, msg, isOwner, from });
+          return;
+        } catch (e) {}
+      }
+    }
+
+    // Command Filter (Owner Only + Prefix: ,)
+    if (!isOwner) return;
     const prefix = config.PREFIX || ",";
     if (!body.startsWith(prefix)) return;
 
-    const [commandTrigger, ...args] = body.slice(prefix.length).trim().split(/\s+/);
-    const cmdName = commandTrigger.toLowerCase();
+    const [cmdTrigger, ...args] = body.slice(prefix.length).trim().split(/\s+/);
+    const cmdName = cmdTrigger.toLowerCase();
     const command = commands.get(cmdName) || aliases.get(cmdName);
 
     if (command) {
+      const context = {
+        sock: waSock,
+        msg,
+        args,
+        text: args.join(" "),
+        from,
+        sender,
+        prefix,
+        reply: (text) => waSock.sendMessage(from, { text }, { quoted: msg }),
+        react: (emoji) => waSock.sendMessage(from, { react: { text: emoji, key: msg.key } }),
+        downloadMedia: () => downloadMediaMessage(msg, "buffer", {}),
+        quoted: msg.message.extendedTextMessage?.contextInfo?.quotedMessage || null,
+        statusModel: StatusModel
+      };
+
       try {
-        await command.execute({
-          sock: waSock,
-          msg,
-          args,
-          text: args.join(" "),
-          from,
-          sender,
-          isGroup,
-          isOwner,
-          prefix,
-          reply: (txt) => waSock.sendMessage(from, { text: txt }, { quoted: msg }),
-          react: (em) => waSock.sendMessage(from, { react: { text: em, key: msg.key } }),
-          downloadMedia: () => downloadMediaMessage(msg, "buffer", {}),
-          quoted: msg.message.extendedTextMessage?.contextInfo?.quotedMessage || null
-        });
+        await command.execute(context);
       } catch (err) {
-        console.error(`Error in [${cmdName}]:`, err.message);
+        console.error(`Command [${cmdName}] Error:`, err.message);
       }
     }
   });
 }
 
+// ==========================================
+// 5. Bot Startup
+// ==========================================
 async function startBot() {
   try {
+    loadPlugins();
     const { state, saveCreds } = await useMongoAuthState();
     if (state.creds && state.creds.registered) {
       sock = makeWASocket({
