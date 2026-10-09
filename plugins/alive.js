@@ -4,7 +4,10 @@ const config = require("../config");
 module.exports = {
   name: "alive",
   aliases: ["status", "info"],
-  async execute(sock, msg) {
+  async execute({ sock, msg, from, react }) {
+    // 👨🏻‍💻 React එක ක්ෂණිකව වැටීමට
+    react("👨🏻‍💻").catch(() => {});
+
     const captionText = 
 `👨🏻‍💻⃝➥❬ ʜᴇꜱʜᴀɴ ᴏꜰᴄ ❭
 
@@ -19,10 +22,10 @@ module.exports = {
 
 *© 𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂 2026 𝐔𝐏𝐃𝐀𝐓𝐄  ❄️*`;
 
-    // Root එකේ logo.jpg තියෙනවා නම් Photo එකත් එක්ක යවනවා
+    // Root එකේ logo.jpg තිබේ නම් ඡායාරූපය සමඟ යැවීම
     if (fs.existsSync(config.LOGO)) {
       await sock.sendMessage(
-        msg.key.remoteJid,
+        from,
         {
           image: fs.readFileSync(config.LOGO),
           caption: captionText
@@ -30,9 +33,8 @@ module.exports = {
         { quoted: msg }
       );
     } else {
-      // Photo එක නැති වුණත් error නොවී Text එක යවනවා
       await sock.sendMessage(
-        msg.key.remoteJid,
+        from,
         { text: captionText },
         { quoted: msg }
       );
