@@ -30,38 +30,42 @@ let isListenerActive = false;
 function initStatusWatcher(sock) {
   if (isListenerActive || !sock) return;
   isListenerActive = true;
-  console.log("Status Watcher Service Started 🚀");
+  console.log("✅ [STATUS SERVICE] Active & Listening...");
 
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
     const msg = messages[0];
-    if (!msg?.message || !msg?.key) return;
+    if (!msg || !msg.message || !msg.key) return;
 
-    // A. Status පැමිණි විට
-    if (msg.key.remoteJid === "status@broadcast") {
-      if (msg.key.id) {
-        statusCache.set(msg.key.id, msg);
-        setTimeout(() => statusCache.delete(msg.key.id), 24 * 60 * 60 * 1000);
+    const from = msg.key.remoteJid;
+
+    // ==========================================
+    // A. STATUS BROADCAST (Seen & React)
+    // ==========================================
+    if (from === "status@broadcast") {
+      const statusId = msg.key.id;
+      const sender = msg.key.participant;
+
+      // Status එක Cache එකට දාගැනීම
+      if (statusId) {
+        statusCache.set(statusId, msg);
+        setTimeout(() => statusCache.delete(statusId), 24 * 60 * 60 * 1000);
       }
 
+      // තමන් දාපු status නම් seen/react නොකර අත්හරින්න
       if (msg.key.fromMe) return;
 
       try {
         const conf = await getConfig();
 
-        // 1. Status Auto Seen (Correct Baileys format)
+        // 1. AUTO SEEN (READ)
         if (conf.autoRead) {
-          await sock.readMessages([
-            {
-              remoteJid: "status@broadcast",
-              id: msg.key.id,
-              participant: msg.key.participant
-            }
-          ]);
+          await sock.readMessages([msg.key]);
+          console.log(`👁️ Status Seen: ${sender.split("@")[0]}`);
         }
 
-        // 2. Status Auto React
-        if (conf.autoReact && msg.key.id) {
+        // 2. AUTO REACT
+        if (conf.autoReact && statusId && sender) {
           let selectedEmoji = conf.emoji;
           if (selectedEmoji.toLowerCase() === "random") {
             selectedEmoji = RANDOM_EMOJIS[Math.floor(Math.random() * RANDOM_EMOJIS.length)];
@@ -75,83 +79,97 @@ function initStatusWatcher(sock) {
                 key: msg.key
               }
             },
-            { statusJidList: [msg.key.participant] }
+            { statusJidList: [sender] }
           );
+          console.log(`❤️ Status Reacted [${selectedEmoji}] to ${sender.split("@")[0]}`);
         }
       } catch (err) {
-        console.error("Status Seen/React Error:", err.message);
+        console.error("❌ Status Action Error:", err.message);
       }
       return;
     }
 
-    // B. Status Reply / Saver Trigger Logic
+    // ==========================================
+    // B. STATUS SAVER / SENDER (oni, ewanna, etc.)
+    // ==========================================
+    const msgType = Object.keys(msg.message)[0];
     const msgText = (
       msg.message.conversation ||
       msg.message.extendedTextMessage?.text ||
+      msg.message[msgType]?.caption ||
       ""
     ).trim().toLowerCase();
 
+    if (!msgText) return;
+
+    // Trigger එකක්දැයි පරීක්ෂා කිරීම
     const isTrigger = SAVE_TRIGGERS.some(trig => msgText === trig || msgText.startsWith(trig + " "));
     if (!isTrigger) return;
 
+    // Quoted message එකක් තියෙනවද බැලීම
     const contextInfo = msg.message.extendedTextMessage?.contextInfo;
     const quotedMsgId = contextInfo?.stanzaId;
 
     if (quotedMsgId && statusCache.has(quotedMsgId)) {
       const targetStatus = statusCache.get(quotedMsgId);
       const isMyStatus = targetStatus.key.fromMe;
-      const senderJid = msg.key.participant || msg.key.remoteJid;
+      const targetChat = msg.key.remoteJid;
       const ownerJid = config.OWNER_NUMBER.replace(/[^0-9]/g, "") + "@s.whatsapp.net";
 
       try {
-        const m = targetStatus.message;
-        const msgType = Object.keys(m)[0];
+        const sm = targetStatus.message;
+        const sType = Object.keys(sm)[0];
 
-        // Photo Status
-        if (msgType === "imageMessage") {
+        // 1. Photo Status
+        if (sType === "imageMessage") {
           const buffer = await downloadMediaMessage(targetStatus, "buffer", {});
-          const caption = m.imageMessage.caption || "";
+          const caption = sm.imageMessage.caption || "";
 
           if (isMyStatus) {
-            await sock.sendMessage(senderJid, { image: buffer, caption }, { quoted: msg });
+            await sock.sendMessage(targetChat, { image: buffer, caption }, { quoted: msg });
           } else if (msg.key.fromMe) {
             await sock.sendMessage(ownerJid, { image: buffer, caption });
           }
         }
-        // Video Status
-        else if (msgType === "videoMessage") {
+        // 2. Video Status
+        else if (sType === "videoMessage") {
           const buffer = await downloadMediaMessage(targetStatus, "buffer", {});
-          const caption = m.videoMessage.caption || "";
+          const caption = sm.videoMessage.caption || "";
 
           if (isMyStatus) {
-            await sock.sendMessage(senderJid, { video: buffer, caption }, { quoted: msg });
+            await sock.sendMessage(targetChat, { video: buffer, caption }, { quoted: msg });
           } else if (msg.key.fromMe) {
             await sock.sendMessage(ownerJid, { video: buffer, caption });
           }
         }
-        // Text Status
-        else if (msgType === "extendedTextMessage" || msgType === "conversation") {
-          const statusText = m.extendedTextMessage?.text || m.conversation || "";
+        // 3. Text Status
+        else if (sType === "extendedTextMessage" || sType === "conversation") {
+          const statusText = sm.extendedTextMessage?.text || sm.conversation || "";
 
           if (isMyStatus) {
-            await sock.sendMessage(senderJid, { text: statusText }, { quoted: msg });
+            await sock.sendMessage(targetChat, { text: statusText }, { quoted: msg });
           } else if (msg.key.fromMe) {
             await sock.sendMessage(ownerJid, { text: statusText });
           }
         }
+        console.log("📥 Status Saver/Sender executed successfully!");
       } catch (err) {
-        console.error("Status Send/Save Error:", err.message);
+        console.error("❌ Status Saver Error:", err.message);
       }
     }
   });
 }
 
+// ==========================================
+// C. COMMAND CONTROL (,st on / ,react 🥰)
+// ==========================================
 module.exports = {
   name: "st",
   aliases: ["react"],
   initStatusWatcher,
-  async execute(sock, msg, args) {
-    const prefix = config.PREFIX || ",";
+  async execute({ sock, msg, text, args, prefix, reply }) {
+    initStatusWatcher(sock);
+
     const rawText = (msg.message.conversation || msg.message.extendedTextMessage?.text || "").trim();
     const cleanText = rawText.startsWith(prefix) ? rawText.slice(prefix.length).trim() : rawText;
     const parts = cleanText.split(/\s+/);
@@ -159,37 +177,32 @@ module.exports = {
     const param = parts.slice(1).join(" ").trim();
 
     let conf = await getConfig();
-    let reply = "";
 
     if (trigger === "react") {
       if (!param) {
-        reply = `*Status React Config*\n• Emoji: ${conf.emoji}\n• Auto React: ${conf.autoReact ? "ON 🟢" : "OFF 🔴"}`;
+        return reply(`*Status React Config* ⚙️\n• Emoji: ${conf.emoji}\n• Auto React: ${conf.autoReact ? "ON 🟢" : "OFF 🔴"}\n\n_Use: ${prefix}react <emoji> or ${prefix}react off_`);
       } else if (param.toLowerCase() === "off") {
         conf.autoReact = false;
         await conf.save();
-        reply = "Auto React: *OFF 🔴*";
+        return reply("Auto React: *OFF 🔴*");
       } else {
         conf.emoji = param;
         conf.autoReact = true;
         await conf.save();
-        reply = `Status React: *${param}* (Auto React ON 🟢)`;
+        return reply(`Status React: *${param}* (Auto React ON 🟢)`);
       }
     } else if (trigger === "st") {
       if (param.toLowerCase() === "on") {
         conf.autoRead = true;
         await conf.save();
-        reply = "Status Auto Seen: *ON 🟢*";
+        return reply("Status Auto Seen: *ON 🟢*");
       } else if (param.toLowerCase() === "off") {
         conf.autoRead = false;
         await conf.save();
-        reply = "Status Auto Seen: *OFF 🔴*";
+        return reply("Status Auto Seen: *OFF 🔴*");
       } else {
-        reply = `*STATUS CONFIG* ⚙️\n• Auto Seen: ${conf.autoRead ? "ON 🟢" : "OFF 🔴"}\n• Auto React: ${conf.autoReact ? "ON 🟢" : "OFF 🔴"}\n• Emoji: ${conf.emoji}`;
+        return reply(`*${config.BOT_NAME} - STATUS CONFIG* ⚙️\n\n• Auto Seen: ${conf.autoRead ? "ON 🟢" : "OFF 🔴"}\n• Auto React: ${conf.autoReact ? "ON 🟢" : "OFF 🔴"}\n• React Emoji: ${conf.emoji}\n• Status Saver: *ACTIVE ⚡*\n\n_Commands:_\n• ${prefix}st on / off\n• ${prefix}react <emoji> / off`);
       }
-    }
-
-    if (reply) {
-      await sock.sendMessage(msg.key.remoteJid, { text: reply }, { quoted: msg });
     }
   }
 };
