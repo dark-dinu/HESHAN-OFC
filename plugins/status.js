@@ -18,29 +18,26 @@ async function getConfig() {
   return conf;
 }
 
-// Memory Cache: Status messages තාවකාලිකව තබා ගැනීම (Save / Send සඳහා)
 const statusCache = new Map();
-
-// Triggers List (Status Saver සඳහා)
 const SAVE_TRIGGERS = [
   "oni", "ona", "ewanna", "evanna", "denna", "send", "save", 
   "dapan", "ewapan", "evapan", "one", "දාපන්", "එවන්න", "දෙන්න", "ඕනි", "ඕන"
 ];
 
+const RANDOM_EMOJIS = ["❤️", "🔥", "🥰", "😍", "✨", "💯", "👏", "🤍"];
 let isListenerActive = false;
 
 function initStatusWatcher(sock) {
-  if (isListenerActive) return;
+  if (isListenerActive || !sock) return;
   isListenerActive = true;
-
-  const RANDOM_EMOJIS = ["❤️", "🔥", "🥰", "😍", "✨", "💯", "👏", "🤍"];
+  console.log("Status Watcher Service Started 🚀");
 
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
     const msg = messages[0];
-    if (!msg?.message) return;
+    if (!msg?.message || !msg?.key) return;
 
-    // A. Status පැමිණි විට Cache එකට එක් කිරීම සහ Auto Read / Auto React ක්‍රියාත්මක වීම
+    // A. Status පැමිණි විට
     if (msg.key.remoteJid === "status@broadcast") {
       if (msg.key.id) {
         statusCache.set(msg.key.id, msg);
@@ -52,12 +49,18 @@ function initStatusWatcher(sock) {
       try {
         const conf = await getConfig();
 
-        // Auto Seen (Read)
+        // 1. Status Auto Seen (Correct Baileys format)
         if (conf.autoRead) {
-          await sock.readMessages([msg.key]);
+          await sock.readMessages([
+            {
+              remoteJid: "status@broadcast",
+              id: msg.key.id,
+              participant: msg.key.participant
+            }
+          ]);
         }
 
-        // Auto React
+        // 2. Status Auto React
         if (conf.autoReact && msg.key.id) {
           let selectedEmoji = conf.emoji;
           if (selectedEmoji.toLowerCase() === "random") {
@@ -66,11 +69,18 @@ function initStatusWatcher(sock) {
 
           await sock.sendMessage(
             "status@broadcast",
-            { react: { text: selectedEmoji, key: msg.key } },
+            {
+              react: {
+                text: selectedEmoji,
+                key: msg.key
+              }
+            },
             { statusJidList: [msg.key.participant] }
           );
         }
-      } catch (e) {}
+      } catch (err) {
+        console.error("Status Seen/React Error:", err.message);
+      }
       return;
     }
 
@@ -91,44 +101,42 @@ function initStatusWatcher(sock) {
       const targetStatus = statusCache.get(quotedMsgId);
       const isMyStatus = targetStatus.key.fromMe;
       const senderJid = msg.key.participant || msg.key.remoteJid;
+      const ownerJid = config.OWNER_NUMBER.replace(/[^0-9]/g, "") + "@s.whatsapp.net";
 
       try {
         const m = targetStatus.message;
         const msgType = Object.keys(m)[0];
 
-        // 1. Photo Status
+        // Photo Status
         if (msgType === "imageMessage") {
           const buffer = await downloadMediaMessage(targetStatus, "buffer", {});
           const caption = m.imageMessage.caption || "";
 
           if (isMyStatus) {
-            await sock.sendMessage(senderJid, { image: buffer, caption: caption });
+            await sock.sendMessage(senderJid, { image: buffer, caption }, { quoted: msg });
           } else if (msg.key.fromMe) {
-            const myJid = sock.user.id.split(":")[0] + "@s.whatsapp.net";
-            await sock.sendMessage(myJid, { image: buffer, caption: caption });
+            await sock.sendMessage(ownerJid, { image: buffer, caption });
           }
         }
-        // 2. Video Status
+        // Video Status
         else if (msgType === "videoMessage") {
           const buffer = await downloadMediaMessage(targetStatus, "buffer", {});
           const caption = m.videoMessage.caption || "";
 
           if (isMyStatus) {
-            await sock.sendMessage(senderJid, { video: buffer, caption: caption });
+            await sock.sendMessage(senderJid, { video: buffer, caption }, { quoted: msg });
           } else if (msg.key.fromMe) {
-            const myJid = sock.user.id.split(":")[0] + "@s.whatsapp.net";
-            await sock.sendMessage(myJid, { video: buffer, caption: caption });
+            await sock.sendMessage(ownerJid, { video: buffer, caption });
           }
         }
-        // 3. Text Status
+        // Text Status
         else if (msgType === "extendedTextMessage" || msgType === "conversation") {
           const statusText = m.extendedTextMessage?.text || m.conversation || "";
 
           if (isMyStatus) {
-            await sock.sendMessage(senderJid, { text: statusText });
+            await sock.sendMessage(senderJid, { text: statusText }, { quoted: msg });
           } else if (msg.key.fromMe) {
-            const myJid = sock.user.id.split(":")[0] + "@s.whatsapp.net";
-            await sock.sendMessage(myJid, { text: statusText });
+            await sock.sendMessage(ownerJid, { text: statusText });
           }
         }
       } catch (err) {
@@ -138,17 +146,13 @@ function initStatusWatcher(sock) {
   });
 }
 
-// 3. Control Command (Prefix සහිතව ක්‍රියාත්මක වේ: ,st / ,react)
 module.exports = {
   name: "st",
   aliases: ["react"],
+  initStatusWatcher,
   async execute(sock, msg, args) {
-    initStatusWatcher(sock);
-
     const prefix = config.PREFIX || ",";
     const rawText = (msg.message.conversation || msg.message.extendedTextMessage?.text || "").trim();
-    
-    // Prefix ඉවත් කර arguments වෙන් කර ගැනීම
     const cleanText = rawText.startsWith(prefix) ? rawText.slice(prefix.length).trim() : rawText;
     const parts = cleanText.split(/\s+/);
     const trigger = parts[0].toLowerCase();
@@ -159,7 +163,7 @@ module.exports = {
 
     if (trigger === "react") {
       if (!param) {
-        reply = `*Status React Config* ⚙️\n• Emoji: ${conf.emoji}\n• Auto React: ${conf.autoReact ? "ON 🟢" : "OFF 🔴"}\n\n_Use: ${prefix}react <emoji> or ${prefix}react off_`;
+        reply = `*Status React Config*\n• Emoji: ${conf.emoji}\n• Auto React: ${conf.autoReact ? "ON 🟢" : "OFF 🔴"}`;
       } else if (param.toLowerCase() === "off") {
         conf.autoReact = false;
         await conf.save();
@@ -180,7 +184,7 @@ module.exports = {
         await conf.save();
         reply = "Status Auto Seen: *OFF 🔴*";
       } else {
-        reply = `*${config.BOT_NAME} - STATUS CONFIG* ⚙️\n\n• Auto Seen: ${conf.autoRead ? "ON 🟢" : "OFF 🔴"}\n• Auto React: ${conf.autoReact ? "ON 🟢" : "OFF 🔴"}\n• React Emoji: ${conf.emoji}\n• Status Saver: *ACTIVE ⚡*\n\n_Commands:_\n• ${prefix}st on / off\n• ${prefix}react <emoji> / off`;
+        reply = `*STATUS CONFIG* ⚙️\n• Auto Seen: ${conf.autoRead ? "ON 🟢" : "OFF 🔴"}\n• Auto React: ${conf.autoReact ? "ON 🟢" : "OFF 🔴"}\n• Emoji: ${conf.emoji}`;
       }
     }
 
