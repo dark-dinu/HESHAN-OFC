@@ -7,7 +7,8 @@ const {
   DisconnectReason, 
   makeCacheableSignalKeyStore, 
   Browsers,
-  delay 
+  delay,
+  downloadMediaMessage 
 } = require("@whiskeysockets/baileys");
 const { useMongoAuthState } = require("./database/mongoSession");
 const config = require("./config");
@@ -20,17 +21,21 @@ const commands = new Map();
 const aliases = new Map();
 let sock = null;
 
-// 1. Plugins Auto-loader (Supports Aliases)
+// 1. Plugins Auto-loader (C++ Modular Structure)
 const pluginsPath = path.join(__dirname, "plugins");
 if (fs.existsSync(pluginsPath)) {
   const files = fs.readdirSync(pluginsPath).filter((f) => f.endsWith(".js"));
   for (const file of files) {
-    const cmd = require(path.join(pluginsPath, file));
-    if (cmd.name && cmd.execute) {
-      commands.set(cmd.name.toLowerCase(), cmd);
-      if (cmd.aliases && Array.isArray(cmd.aliases)) {
-        cmd.aliases.forEach(alias => aliases.set(alias.toLowerCase(), cmd));
+    try {
+      const cmd = require(path.join(pluginsPath, file));
+      if (cmd.name && cmd.execute) {
+        commands.set(cmd.name.toLowerCase(), cmd);
+        if (cmd.aliases && Array.isArray(cmd.aliases)) {
+          cmd.aliases.forEach(alias => aliases.set(alias.toLowerCase(), cmd));
+        }
       }
+    } catch (e) {
+      console.error(`Failed to load plugin: ${file}`, e.message);
     }
   }
 }
@@ -131,9 +136,17 @@ app.get("/get-code", async (req, res) => {
   }
 });
 
-// 3. Execution Core (Prefix: ,)
+// 3. Execution Core & Unified Command Engine
 function initEvents(waSock, saveCreds) {
   waSock.ev.on("creds.update", saveCreds);
+
+  // Background Services Auto-Initiator (උදා: Status Watcher)
+  try {
+    const statusPlugin = require("./plugins/status");
+    if (statusPlugin && statusPlugin.initStatusWatcher) {
+      statusPlugin.initStatusWatcher(waSock);
+    }
+  } catch (e) {}
 
   waSock.ev.on("connection.update", (update) => {
     const { connection, lastDisconnect } = update;
@@ -150,40 +163,61 @@ function initEvents(waSock, saveCreds) {
   waSock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
     const msg = messages[0];
-    if (!msg.message) return;
+    if (!msg?.message) return;
 
-    // Direct owner validation
+    // Direct sender/jid extraction
+    const from = msg.key.remoteJid;
+    const isGroup = from.endsWith("@g.us");
     const rawSender = msg.key.fromMe 
       ? config.OWNER_NUMBER 
-      : (msg.key.participant || msg.key.remoteJid || "");
-    const senderNumber = rawSender.split("@")[0].replace(/[^0-9]/g, "");
+      : (msg.key.participant || from || "");
+    const sender = rawSender.split("@")[0].replace(/[^0-9]/g, "");
     const ownerClean = config.OWNER_NUMBER.replace(/[^0-9]/g, "");
+    const isOwner = msg.key.fromMe || sender === ownerClean;
 
-    if (senderNumber !== ownerClean) return;
+    // Strict Private Guard
+    if (!isOwner) return;
 
+    // Extract Message text
     const messageType = Object.keys(msg.message)[0];
-    const text = (
+    const body = (
       msg.message.conversation ||
-      msg.message[messageType]?.text ||
+      msg.message.extendedTextMessage?.text ||
       msg.message[messageType]?.caption ||
       ""
     ).trim();
 
-    // කොමාවෙන් (,) පටන් නොගන්නා සාමාන්‍ය පණිවිඩ නොසලකා හැරීම
     const prefix = config.PREFIX || ",";
-    if (!text.startsWith(prefix)) return;
+    if (!body.startsWith(prefix)) return;
 
-    // Prefix එක ඉවත් කර command නම සහ arguments වෙන් කර ගැනීම
-    const [firstWord, ...args] = text.slice(prefix.length).trim().split(/\s+/);
-    const trigger = firstWord.toLowerCase();
-
-    const command = commands.get(trigger) || aliases.get(trigger);
+    // Split Command Name and Arguments
+    const [commandTrigger, ...args] = body.slice(prefix.length).trim().split(/\s+/);
+    const cmdName = commandTrigger.toLowerCase();
+    const command = commands.get(cmdName) || aliases.get(cmdName);
 
     if (command) {
+      // Powerful Context Helpers (C++ Style Tools Injection)
+      const context = {
+        sock: waSock,
+        msg,
+        args,
+        text: args.join(" "),
+        from,
+        sender,
+        isGroup,
+        isOwner,
+        prefix,
+        reply: (text) => waSock.sendMessage(from, { text }, { quoted: msg }),
+        react: (emoji) => waSock.sendMessage(from, { react: { text: emoji, key: msg.key } }),
+        downloadMedia: () => downloadMediaMessage(msg, "buffer", {}),
+        quoted: msg.message.extendedTextMessage?.contextInfo?.quotedMessage || null
+      };
+
       try {
-        await command.execute(waSock, msg, args);
+        await command.execute(context);
       } catch (err) {
-        console.error(`Error in [${trigger}]:`, err);
+        console.error(`Error in [${cmdName}]:`, err);
+        await waSock.sendMessage(from, { text: `⚠️ Exception: ${err.message}` }, { quoted: msg });
       }
     }
   });
