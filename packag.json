@@ -1,0 +1,17 @@
+{
+  "name": "heshan-md",
+  "version": "3.0.0",
+  "description": "WhatsApp Private Bot - Latest Baileys & MongoDB Pair System",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js",
+    "pair": "node pair.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.24",
+    "express": "^4.21.0",
+    "mongoose": "^8.7.0",
+    "pino": "^9.4.0"
+  }
+}
