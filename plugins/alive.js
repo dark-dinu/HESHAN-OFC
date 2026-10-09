@@ -5,7 +5,6 @@ module.exports = {
   name: "alive",
   aliases: ["status", "info"],
   async execute({ sock, msg, from, react }) {
-    // 👨🏻‍💻 React එක ක්ෂණිකව වැටීමට
     react("👨🏻‍💻").catch(() => {});
 
     const captionText = 
@@ -22,21 +21,18 @@ module.exports = {
 
 *© 𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂 2026 𝐔𝐏𝐃𝐀𝐓𝐄  ❄️*`;
 
-    // Root එකේ logo.jpg තිබේ නම් ඡායාරූපය සමඟ යැවීම
     if (fs.existsSync(config.LOGO)) {
       await sock.sendMessage(
         from,
         {
           image: fs.readFileSync(config.LOGO),
           caption: captionText
-        },
-        { quoted: msg }
+        }
       );
     } else {
       await sock.sendMessage(
         from,
-        { text: captionText },
-        { quoted: msg }
+        { text: captionText }
       );
     }
   }
