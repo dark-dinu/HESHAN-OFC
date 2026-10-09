@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const { downloadMediaMessage } = require("@whiskeysockets/baileys");
+const config = require("../config");
 
 // 1. Database Model
 const StatusSchema = new mongoose.Schema({
@@ -17,10 +18,10 @@ async function getConfig() {
   return conf;
 }
 
-// Memory Cache: Status messages තාවකාලිකව තියාගන්න (Save / Send කරගන්න)
+// Memory Cache: Status messages තාවකාලිකව තබා ගැනීම (Save / Send සඳහා)
 const statusCache = new Map();
 
-// Triggers List (ඕනෑම අකුරකින් ආවත් අහුවෙන්න)
+// Triggers List (Status Saver සඳහා)
 const SAVE_TRIGGERS = [
   "oni", "ona", "ewanna", "evanna", "denna", "send", "save", 
   "dapan", "ewapan", "evapan", "one", "දාපන්", "එවන්න", "දෙන්න", "ඕනි", "ඕන"
@@ -39,12 +40,10 @@ function initStatusWatcher(sock) {
     const msg = messages[0];
     if (!msg?.message) return;
 
-    // A. Status ආවම Cache එකට දාගැනීම සහ Auto Read / Auto React වීම
+    // A. Status පැමිණි විට Cache එකට එක් කිරීම සහ Auto Read / Auto React ක්‍රියාත්මක වීම
     if (msg.key.remoteJid === "status@broadcast") {
-      // Status එක memory cache එකට දාගන්නවා
       if (msg.key.id) {
         statusCache.set(msg.key.id, msg);
-        // Cache එක ඕනවට වඩා ලොකු නොවෙන්න පැය 24කට පසු clear වෙනවා
         setTimeout(() => statusCache.delete(msg.key.id), 24 * 60 * 60 * 1000);
       }
 
@@ -82,14 +81,12 @@ function initStatusWatcher(sock) {
       ""
     ).trim().toLowerCase();
 
-    // Trigger එකක්දැයි බැලීම
     const isTrigger = SAVE_TRIGGERS.some(trig => msgText === trig || msgText.startsWith(trig + " "));
     if (!isTrigger) return;
 
     const contextInfo = msg.message.extendedTextMessage?.contextInfo;
     const quotedMsgId = contextInfo?.stanzaId;
 
-    // Status එකකට reply එකක් නම් පමණක් වැඩ කිරීම
     if (quotedMsgId && statusCache.has(quotedMsgId)) {
       const targetStatus = statusCache.get(quotedMsgId);
       const isMyStatus = targetStatus.key.fromMe;
@@ -105,11 +102,10 @@ function initStatusWatcher(sock) {
           const caption = m.imageMessage.caption || "";
 
           if (isMyStatus) {
-            // වෙන කෙනෙක් මගේ status එකක් ඉල්ලුවම -> ඒ කෙනාට යවන්න
             await sock.sendMessage(senderJid, { image: buffer, caption: caption });
           } else if (msg.key.fromMe) {
-            // මම වෙන කෙනෙක්ගේ status එකක් ඉල්ලුවම -> මගේ inbox එකට දාගන්න
-            await sock.sendMessage(sock.user.id.split(":")[0] + "@s.whatsapp.net", { image: buffer, caption: caption });
+            const myJid = sock.user.id.split(":")[0] + "@s.whatsapp.net";
+            await sock.sendMessage(myJid, { image: buffer, caption: caption });
           }
         }
         // 2. Video Status
@@ -120,7 +116,8 @@ function initStatusWatcher(sock) {
           if (isMyStatus) {
             await sock.sendMessage(senderJid, { video: buffer, caption: caption });
           } else if (msg.key.fromMe) {
-            await sock.sendMessage(sock.user.id.split(":")[0] + "@s.whatsapp.net", { video: buffer, caption: caption });
+            const myJid = sock.user.id.split(":")[0] + "@s.whatsapp.net";
+            await sock.sendMessage(myJid, { video: buffer, caption: caption });
           }
         }
         // 3. Text Status
@@ -130,7 +127,8 @@ function initStatusWatcher(sock) {
           if (isMyStatus) {
             await sock.sendMessage(senderJid, { text: statusText });
           } else if (msg.key.fromMe) {
-            await sock.sendMessage(sock.user.id.split(":")[0] + "@s.whatsapp.net", { text: statusText });
+            const myJid = sock.user.id.split(":")[0] + "@s.whatsapp.net";
+            await sock.sendMessage(myJid, { text: statusText });
           }
         }
       } catch (err) {
@@ -140,15 +138,19 @@ function initStatusWatcher(sock) {
   });
 }
 
-// 3. Control Command (Settings manage කරන්න)
+// 3. Control Command (Prefix සහිතව ක්‍රියාත්මක වේ: ,st / ,react)
 module.exports = {
   name: "st",
   aliases: ["react"],
   async execute(sock, msg, args) {
     initStatusWatcher(sock);
 
+    const prefix = config.PREFIX || ",";
     const rawText = (msg.message.conversation || msg.message.extendedTextMessage?.text || "").trim();
-    const parts = rawText.split(/\s+/);
+    
+    // Prefix ඉවත් කර arguments වෙන් කර ගැනීම
+    const cleanText = rawText.startsWith(prefix) ? rawText.slice(prefix.length).trim() : rawText;
+    const parts = cleanText.split(/\s+/);
     const trigger = parts[0].toLowerCase();
     const param = parts.slice(1).join(" ").trim();
 
@@ -157,7 +159,7 @@ module.exports = {
 
     if (trigger === "react") {
       if (!param) {
-        reply = `Emoji: ${conf.emoji} | Auto React: ${conf.autoReact ? "ON 🟢" : "OFF 🔴"}`;
+        reply = `*Status React Config* ⚙️\n• Emoji: ${conf.emoji}\n• Auto React: ${conf.autoReact ? "ON 🟢" : "OFF 🔴"}\n\n_Use: ${prefix}react <emoji> or ${prefix}react off_`;
       } else if (param.toLowerCase() === "off") {
         conf.autoReact = false;
         await conf.save();
@@ -178,7 +180,7 @@ module.exports = {
         await conf.save();
         reply = "Status Auto Seen: *OFF 🔴*";
       } else {
-        reply = `*Status System* ⚙️\n• Auto Seen: ${conf.autoRead ? "ON 🟢" : "OFF 🔴"}\n• Auto React: ${conf.autoReact ? "ON 🟢" : "OFF 🔴"}\n• React Emoji: ${conf.emoji}\n• Status Saver & Auto Sender: *ACTIVE ⚡*`;
+        reply = `*${config.BOT_NAME} - STATUS CONFIG* ⚙️\n\n• Auto Seen: ${conf.autoRead ? "ON 🟢" : "OFF 🔴"}\n• Auto React: ${conf.autoReact ? "ON 🟢" : "OFF 🔴"}\n• React Emoji: ${conf.emoji}\n• Status Saver: *ACTIVE ⚡*\n\n_Commands:_\n• ${prefix}st on / off\n• ${prefix}react <emoji> / off`;
       }
     }
 
