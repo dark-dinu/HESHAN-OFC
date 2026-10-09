@@ -9,5 +9,5 @@ module.exports = {
   PAIR_KEY: "Heshan@2007",
   
   // ඔයා දාපු නමම හරියටම:
-  LOGO: path.join(__dirname, "logo,jpg")
+  LOGO: path.join(__dirname, "logo.jpg")
 };
