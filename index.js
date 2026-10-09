@@ -35,7 +35,7 @@ if (fs.existsSync(pluginsPath)) {
   }
 }
 
-// 2. Minimal Dark Pair Dashboard (𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂 Vibe)
+// 2. Minimal Dark Pair Dashboard (𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂 Vibe with Auth Key)
 app.get("/", (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -59,6 +59,7 @@ app.get("/", (req, res) => {
       <div class="box">
         <h1>𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂</h1>
         <p>Private System Link Interface</p>
+        <input type="password" id="key" placeholder="Enter Secret Key" required />
         <input type="text" id="phone" placeholder="947xxxxxxxx" required />
         <button id="btn" onclick="fetchCode()">Pair WhatsApp</button>
         <div id="code"></div>
@@ -66,13 +67,14 @@ app.get("/", (req, res) => {
       <script>
         async function fetchCode() {
           const num = document.getElementById('phone').value.replace(/[^0-9]/g, '');
+          const key = document.getElementById('key').value.trim();
           const display = document.getElementById('code');
           const btn = document.getElementById('btn');
-          if(!num) return alert('Enter phone number');
+          if(!key || !num) return alert('Key සහ Phone Number එක ඇතුළත් කරන්න');
           display.innerText = 'Connecting...';
           btn.disabled = true;
           try {
-            const res = await fetch('/get-code?num=' + num);
+            const res = await fetch('/get-code?num=' + num + '&key=' + encodeURIComponent(key));
             const data = await res.json();
             display.innerText = data.code || data.error || 'Failed';
           } catch(e) {
@@ -88,7 +90,12 @@ app.get("/", (req, res) => {
 });
 
 app.get("/get-code", async (req, res) => {
-  let num = req.query.num;
+  const { num, key } = req.query;
+
+  if (!key || key !== config.PAIR_KEY) {
+    return res.status(403).json({ error: "Access Denied: Invalid Key" });
+  }
+
   if (!num) return res.status(400).json({ error: "Missing number" });
 
   try {
@@ -124,7 +131,7 @@ app.get("/get-code", async (req, res) => {
   }
 });
 
-// 3. Execution Core (No Prefix)
+// 3. Execution Core (Prefix: ,)
 function initEvents(waSock, saveCreds) {
   waSock.ev.on("creds.update", saveCreds);
 
@@ -162,10 +169,12 @@ function initEvents(waSock, saveCreds) {
       ""
     ).trim();
 
-    if (!text) return;
+    // කොමාවෙන් (,) පටන් නොගන්නා සාමාන්‍ය පණිවිඩ නොසලකා හැරීම
+    const prefix = config.PREFIX || ",";
+    if (!text.startsWith(prefix)) return;
 
-    // Splits without checking for symbols (No Prefix required)
-    const [firstWord, ...args] = text.split(/\s+/);
+    // Prefix එක ඉවත් කර command නම සහ arguments වෙන් කර ගැනීම
+    const [firstWord, ...args] = text.slice(prefix.length).trim().split(/\s+/);
     const trigger = firstWord.toLowerCase();
 
     const command = commands.get(trigger) || aliases.get(trigger);
