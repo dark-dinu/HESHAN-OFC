@@ -215,12 +215,13 @@ function initEvents(waSock, saveCreds) {
     }
 
     // 2. Strict Owner Verification
+    const myCleanNumber = (waSock.user?.id || config.OWNER_NUMBER).split(":")[0].replace(/[^0-9]/g, "");
     const rawSender = msg.key.fromMe 
-      ? config.OWNER_NUMBER 
+      ? myCleanNumber 
       : (msg.key.participant || from || "");
-    const sender = rawSender.split("@")[0].replace(/[^0-9]/g, "");
+    const sender = rawSender.split("@")[0].split(":")[0].replace(/[^0-9]/g, "");
     const ownerClean = config.OWNER_NUMBER.replace(/[^0-9]/g, "");
-    const isOwner = msg.key.fromMe || sender === ownerClean;
+    const isOwner = msg.key.fromMe || sender === ownerClean || sender === myCleanNumber;
 
     if (!isOwner) return;
 
@@ -233,7 +234,8 @@ function initEvents(waSock, saveCreds) {
     const command = commands.get(cmdName) || aliases.get(cmdName);
 
     if (command) {
-      const isSelfChat = from.split("@")[0].replace(/[^0-9]/g, "") === ownerClean;
+      const targetPhone = from.split("@")[0].split(":")[0].replace(/[^0-9]/g, "");
+      const isSelfChat = from.includes("@s.whatsapp.net") && (targetPhone === ownerClean || targetPhone === myCleanNumber);
 
       const context = {
         sock: waSock,
@@ -245,8 +247,9 @@ function initEvents(waSock, saveCreds) {
         sender,
         prefix,
         config,
+        // Self-chat එකකදී "Waiting for this message" නොවීමට quoted metadata ඉවත් කර direct text යවයි
         reply: (text) => waSock.sendMessage(from, { text }, isSelfChat ? {} : { quoted: msg }),
-        react: (emoji) => waSock.sendMessage(from, { react: { text: emoji, key: msg.key } }),
+        react: (emoji) => waSock.sendMessage(from, { react: { text: emoji, key: msg.key } }).catch(() => {}),
         downloadMedia: () => downloadMediaMessage(msg, "buffer", {}),
         quoted: msg.message.extendedTextMessage?.contextInfo?.quotedMessage || null
       };
