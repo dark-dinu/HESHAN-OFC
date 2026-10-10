@@ -2,7 +2,6 @@ const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const pino = require("pino");
-const mongoose = require("mongoose");
 const { 
   makeWASocket, 
   DisconnectReason, 
@@ -21,12 +20,14 @@ app.use(express.urlencoded({ extended: true }));
 const commands = new Map();
 const aliases = new Map();
 let sock = null;
+let isStarting = false;
+let daemonsInitialized = false;
 
 // Global Memory Cache for Status Saver
 global.statusCache = global.statusCache || new Map();
 
 // ==========================================
-// 1. Plugins Auto-Loader (C++ Modular Structure)
+// 1. Plugins Auto-Loader (Fast In-Memory Map)
 // ==========================================
 function loadPlugins() {
   commands.clear();
@@ -41,7 +42,7 @@ function loadPlugins() {
         const cmd = require(path.join(pluginsPath, file));
         if (cmd.name && cmd.execute) {
           commands.set(cmd.name.toLowerCase(), cmd);
-          if (cmd.aliases && Array.isArray(cmd.aliases)) {
+          if (Array.isArray(cmd.aliases)) {
             cmd.aliases.forEach(alias => aliases.set(alias.toLowerCase(), cmd));
           }
         }
@@ -49,7 +50,7 @@ function loadPlugins() {
         console.error(`[Plugin Error] ${file}:`, err.message);
       }
     }
-    console.log(`Loaded ${commands.size} plugins successfully.`);
+    console.log(`⚡ Loaded ${commands.size} plugins cleanly.`);
   }
 }
 
@@ -76,7 +77,7 @@ app.get("/", (req, res) => {
     <body>
       <div class="box">
         <h1>𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂</h1>
-        <p style="color:#8b949e;font-size:0.85rem;margin-bottom:20px;">System Link Portal</p>
+        <p style="color:#8b949e;font-size:0.85rem;margin-bottom:20px;">Private Core Link Portal</p>
         <input type="password" id="key" placeholder="Enter Secret Key" required />
         <input type="text" id="phone" placeholder="947xxxxxxxx" required />
         <button id="btn" onclick="fetchCode()">Pair WhatsApp</button>
@@ -111,16 +112,20 @@ app.get("/get-code", async (req, res) => {
 
   try {
     const { state, saveCreds } = await useMongoAuthState();
-    if (sock) { try { sock.end(); } catch (e) {} }
+    if (sock) { 
+      try { sock.end(); } catch (e) {} 
+      sock = null;
+    }
 
     sock = makeWASocket({
       auth: {
         creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" }))
+        keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }))
       },
       printQRInTerminal: false,
-      logger: pino({ level: "silent" }),
-      browser: Browsers.macOS("Chrome")
+      logger: pino({ level: "fatal" }),
+      browser: Browsers.macOS("Chrome"),
+      defaultQueryTimeoutMs: 60000
     });
 
     sock.ev.on("creds.update", saveCreds);
@@ -141,51 +146,46 @@ app.get("/get-code", async (req, res) => {
 });
 
 // ==========================================
-// 3. Main Event Engine
+// 3. Main Event Engine & Message Router
 // ==========================================
 function initEvents(waSock, saveCreds) {
   waSock.ev.on("creds.update", saveCreds);
 
-  // Background Services Hook
-  const triggerBackgroundDaemons = () => {
+  const initDaemons = () => {
+    if (daemonsInitialized) return;
+    daemonsInitialized = true;
+
     try {
       const statusPlugin = require("./plugins/status");
-      if (statusPlugin && statusPlugin.initStatusWatcher) {
-        statusPlugin.initStatusWatcher(waSock);
-      }
+      if (statusPlugin?.initStatusWatcher) statusPlugin.initStatusWatcher(waSock);
     } catch (e) {}
 
     try {
       const timemgsPlugin = require("./plugins/timemgs");
-      if (timemgsPlugin && timemgsPlugin.startScheduleDaemon) {
-        timemgsPlugin.startScheduleDaemon(waSock);
-      }
+      if (timemgsPlugin?.startScheduleDaemon) timemgsPlugin.startScheduleDaemon(waSock);
     } catch (e) {}
   };
-
-  triggerBackgroundDaemons();
 
   waSock.ev.on("connection.update", (update) => {
     const { connection, lastDisconnect } = update;
     if (connection === "close") {
+      daemonsInitialized = false;
       const reason = lastDisconnect?.error?.output?.statusCode;
       if (reason !== DisconnectReason.loggedOut) {
-        startBot();
+        setTimeout(startBot, 3000);
       }
     } else if (connection === "open") {
-      console.log(`⚡ ${config.BOT_NAME} Connected & Operational 🟢`);
-      triggerBackgroundDaemons();
+      console.log(`⚡ ${config.BOT_NAME} Connected & Fully Operational 🟢`);
+      initDaemons();
     }
   });
 
   waSock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
     const msg = messages[0];
-    if (!msg || !msg.message || !msg.key) return;
+    if (!msg?.message || !msg?.key) return;
 
     const from = msg.key.remoteJid;
-
-    // Status broadcast messages are handled by status.js background watcher
     if (from === "status@broadcast") return;
 
     const mType = Object.keys(msg.message)[0];
@@ -196,12 +196,12 @@ function initEvents(waSock, saveCreds) {
       ""
     ).trim();
 
-    // 1. Status Saver Interceptor (oni, ewanna, dapan, etc.)
+    // 1. Direct Status Saver Interceptor
     const quotedStanzaId = msg.message.extendedTextMessage?.contextInfo?.stanzaId;
     if (quotedStanzaId) {
       try {
         const statusPlugin = require("./plugins/status");
-        if (statusPlugin && statusPlugin.onReply) {
+        if (statusPlugin?.onReply) {
           const handled = await statusPlugin.onReply({
             sock: waSock,
             msg,
@@ -214,7 +214,7 @@ function initEvents(waSock, saveCreds) {
       } catch (e) {}
     }
 
-    // 2. Command Authentication (Owner Only)
+    // 2. Strict Owner Verification
     const rawSender = msg.key.fromMe 
       ? config.OWNER_NUMBER 
       : (msg.key.participant || from || "");
@@ -224,7 +224,7 @@ function initEvents(waSock, saveCreds) {
 
     if (!isOwner) return;
 
-    // 3. Command Execution
+    // 3. Command Execution Routing
     const prefix = config.PREFIX || ",";
     if (!body.startsWith(prefix)) return;
 
@@ -233,7 +233,6 @@ function initEvents(waSock, saveCreds) {
     const command = commands.get(cmdName) || aliases.get(cmdName);
 
     if (command) {
-      // Self-chat (Message yourself) ද යන්න හඳුනා ගැනීම
       const isSelfChat = from.split("@")[0].replace(/[^0-9]/g, "") === ownerClean;
 
       const context = {
@@ -246,7 +245,6 @@ function initEvents(waSock, saveCreds) {
         sender,
         prefix,
         config,
-        // Self chat එකේදී "Waiting for this message" නොවෙන්න direct text යැවීම
         reply: (text) => waSock.sendMessage(from, { text }, isSelfChat ? {} : { quoted: msg }),
         react: (emoji) => waSock.sendMessage(from, { react: { text: emoji, key: msg.key } }),
         downloadMedia: () => downloadMediaMessage(msg, "buffer", {}),
@@ -256,33 +254,45 @@ function initEvents(waSock, saveCreds) {
       try {
         await command.execute(context);
       } catch (err) {
-        console.error(`Command [${cmdName}] Error:`, err.message);
+        console.error(`Command [${cmdName}] execution failed:`, err.message);
       }
     }
   });
 }
 
 // ==========================================
-// 4. Bot Startup
+// 4. Bot Daemon Starter
 // ==========================================
 async function startBot() {
+  if (isStarting) return;
+  isStarting = true;
+
   try {
     loadPlugins();
     const { state, saveCreds } = await useMongoAuthState();
-    if (state.creds && state.creds.registered) {
+    if (state.creds?.registered) {
+      if (sock) {
+        try { sock.end(); } catch (e) {}
+      }
+
       sock = makeWASocket({
         auth: {
           creds: state.creds,
-          keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" }))
+          keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }))
         },
         printQRInTerminal: false,
-        logger: pino({ level: "silent" }),
-        browser: Browsers.macOS("Chrome")
+        logger: pino({ level: "fatal" }),
+        browser: Browsers.macOS("Chrome"),
+        defaultQueryTimeoutMs: 60000,
+        markOnlineOnConnect: true
       });
+
       initEvents(sock, saveCreds);
     }
   } catch (e) {
-    console.error("StartBot Error:", e.message);
+    console.error("StartBot fatal:", e.message);
+  } finally {
+    isStarting = false;
   }
 }
 
