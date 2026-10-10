@@ -2,32 +2,59 @@ const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const pino = require("pino");
-const { 
-  makeWASocket, 
-  DisconnectReason, 
-  makeCacheableSignalKeyStore, 
-  Browsers, 
-  delay, 
-  downloadMediaMessage 
-} = require("@whiskeysockets/baileys");
-const { useMongoAuthState } = require("./auth");
+const axios = require("axios");
+const baileys = require("@whiskeysockets/baileys");
+const makeWASocket = baileys.default || baileys.makeWASocket;
+const {
+  DisconnectReason,
+  makeCacheableSignalKeyStore,
+  Browsers,
+  delay,
+  downloadMediaMessage,
+  jidNormalizedUser,
+  fetchLatestBaileysVersion
+} = baileys;
+const { useMongoAuthState, flushWrites } = require("./auth");
+const CONFIG = require("./config");
+
+// "Closing session" logs වල noise අඩු කරන්න
+const _info = console.info;
+console.info = (...a) => {
+  if (typeof a[0] === "string" && a[0].startsWith("Closing session")) return;
+  _info(...a);
+};
+
+// කිසිම error එකකට process එක crash වෙන්න දෙන්නෙ නෑ
+process.on("uncaughtException", (e) => console.error("[uncaughtException]", e?.message || e));
+process.on("unhandledRejection", (e) => console.error("[unhandledRejection]", e?.message || e));
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-const CONFIG = {
-  BOT_NAME: "𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂",
-  PREFIX: ",",
-  OWNER_NUMBER: "94719845166",
-  PORT: process.env.PORT || 3000
-};
-
 const commands = new Map();
 const aliases = new Map();
-const messageStore = new Map(); // Anti "Waiting for this message" Cache
+const messageStore = new Map();   // retry requests වලට (Waiting for this message වළක්වන්න)
+const processed = new Set();      // එකම message එක දෙපාරක් execute වීම වළක්වන්න
+
 let sock = null;
-let isStarting = false;
+let creating = null;
+let reconnectTimer = null;
+let retryCount = 0;
+let waVersion = null;
+let connState = "idle";
+
+// Baileys retry counter cache (infinite retry loops වළක්වයි)
+function makeCache(max = 5000) {
+  const m = new Map();
+  return {
+    get: (k) => m.get(k),
+    set: (k, v) => { m.set(k, v); if (m.size > max) m.delete(m.keys().next().value); },
+    del: (k) => m.delete(k),
+    flushAll: () => m.clear()
+  };
+}
+const msgRetryCounterCache = makeCache();
 
 // ==========================================
 // 1. Plugins Auto-Loader
@@ -36,32 +63,135 @@ function loadPlugins() {
   commands.clear();
   aliases.clear();
   const pluginsPath = path.join(__dirname, "plugins");
-  
-  if (!fs.existsSync(pluginsPath)) {
-    fs.mkdirSync(pluginsPath, { recursive: true });
-  }
+  if (!fs.existsSync(pluginsPath)) fs.mkdirSync(pluginsPath, { recursive: true });
 
-  const files = fs.readdirSync(pluginsPath).filter((f) => f.endsWith(".js"));
-  for (const file of files) {
+  for (const file of fs.readdirSync(pluginsPath).filter((f) => f.endsWith(".js"))) {
     try {
       const fullPath = path.join(pluginsPath, file);
       delete require.cache[require.resolve(fullPath)];
       const cmd = require(fullPath);
       if (cmd.name && cmd.execute) {
         commands.set(cmd.name.toLowerCase(), cmd);
-        if (Array.isArray(cmd.aliases)) {
-          cmd.aliases.forEach(alias => aliases.set(alias.toLowerCase(), cmd));
-        }
+        (cmd.aliases || []).forEach((a) => aliases.set(a.toLowerCase(), cmd));
       }
     } catch (err) {
       console.error(`[Plugin Load Error] ${file}:`, err.message);
     }
   }
-  console.log(`⚡ [CORE] Loaded ${commands.size} commands cleanly.`);
+  console.log(`⚡ [CORE] Loaded ${commands.size} commands.`);
 }
 
 // ==========================================
-// 2. High-Speed Web Portal
+// 2. Socket manager (එකම වෙලාවක socket එකක් විතරයි)
+// ==========================================
+function killSocket() {
+  if (!sock) return;
+  const old = sock;
+  sock = null;
+  try {
+    old.ev.removeAllListeners("connection.update");
+    old.ev.removeAllListeners("messages.upsert");
+    old.ev.removeAllListeners("creds.update");
+  } catch (e) {}
+  try { old.end(undefined); } catch (e) {}
+}
+
+function scheduleReconnect(ms) {
+  if (reconnectTimer) return;
+  const wait = ms ?? Math.min(2000 * 2 ** retryCount, 60000);
+  retryCount++;
+  console.log(`🔁 Reconnecting in ${Math.round(wait / 1000)}s ...`);
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null;
+    try {
+      await createSocket();
+    } catch (e) {
+      console.error("Reconnect fail:", e.message);
+      scheduleReconnect();
+    }
+  }, wait);
+}
+
+function createSocket() {
+  if (creating) return creating;
+  creating = _createSocket().finally(() => { creating = null; });
+  return creating;
+}
+
+async function _createSocket() {
+  killSocket();
+  connState = "connecting";
+  const { state, saveCreds, clearSession } = await useMongoAuthState();
+
+  if (!waVersion) {
+    try {
+      const v = await Promise.race([fetchLatestBaileysVersion(), delay(8000).then(() => null)]);
+      if (v?.version) waVersion = v.version;
+    } catch (e) {}
+  }
+
+  const s = makeWASocket({
+    ...(waVersion ? { version: waVersion } : {}),
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" }))
+    },
+    printQRInTerminal: false,
+    logger: pino({ level: "silent" }),
+    browser: Browsers.macOS("Chrome"),
+    defaultQueryTimeoutMs: 60000,
+    keepAliveIntervalMs: 25000,
+    connectTimeoutMs: 60000,
+    markOnlineOnConnect: false,
+    syncFullHistory: false,
+    generateHighQualityLinkPreview: false,
+    msgRetryCounterCache,
+    getMessage: async (key) => messageStore.get(key.id) || undefined
+  });
+
+  sock = s;
+  s.ev.on("creds.update", saveCreds);
+
+  s.ev.on("connection.update", async ({ connection, lastDisconnect }) => {
+    if (sock !== s) return; // පරණ socket එකක event නම් ignore
+    if (connection === "open") {
+      connState = "open";
+      retryCount = 0;
+      console.log(`⚡ [CONNECTED] ${CONFIG.BOT_NAME} Online & Ready 🟢`);
+    } else if (connection === "close") {
+      connState = "closed";
+      const reason = lastDisconnect?.error?.output?.statusCode;
+      console.log("🔌 Connection closed, reason:", reason);
+
+      if (reason === DisconnectReason.loggedOut) {
+        // Phone එකෙන් logout කළා → session අවලංගුයි. Clear කරලා ආයෙ pair කරන්න දෙනවා.
+        console.log("❌ Logged out. Session clear කළා. Web portal එකෙන් ආයෙ pair කරන්න.");
+        killSocket();
+        try { await clearSession(); } catch (e) {}
+        messageStore.clear();
+        return;
+      }
+      if (reason === DisconnectReason.restartRequired) return scheduleReconnect(500);
+      if (reason === DisconnectReason.connectionReplaced) {
+        console.log("⚠️ වෙන instance එකක (redeploy / වෙන server) මේ session එකම run වෙනවා. තත්පර 20කින් ආයෙ try කරනවා.");
+        return scheduleReconnect(20000);
+      }
+      scheduleReconnect();
+    }
+  });
+
+  s.ev.on("messages.upsert", ({ messages, type }) => {
+    if (type !== "notify") return;
+    for (const msg of messages) {
+      handleMessage(s, msg).catch((e) => console.error("Handler error:", e.message));
+    }
+  });
+
+  return s;
+}
+
+// ==========================================
+// 3. Web portal & routes
 // ==========================================
 app.get("/", (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -117,15 +247,91 @@ app.get("/", (req, res) => {
   `);
 });
 
+// ==========================================
+// 3. Socket manager (එකම වෙලාවේ socket එකක් විතරයි)
+// ==========================================
+function killSocket() {
+  if (!sock) return;
+  const old = sock;
+  sock = null;
+  try {
+    old.ev.removeAllListeners("connection.update");
+    old.ev.removeAllListeners("messages.upsert");
+    old.ev.removeAllListeners("creds.update");
+  } catch (e) {}
+  try { old.end(undefined); } catch (e) {}
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null;
+    try { await createSocket(); } catch (e) { console.error("Reconnect fail:", e.message); scheduleReconnect(); }
+  }, 3000);
+}
+
+async function createSocket() {
+  killSocket();
+  const { state, saveCreds } = await useMongoAuthState();
+
+  const s = makeWASocket({
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" }))
+    },
+    printQRInTerminal: false,
+    logger: pino({ level: "silent" }),
+    browser: Browsers.macOS("Chrome"),
+    defaultQueryTimeoutMs: 60000,
+    markOnlineOnConnect: true,
+    getMessage: async (key) => messageStore.get(key.id) || undefined
+  });
+
+  sock = s;
+  s.ev.on("creds.update", saveCreds);
+
+  s.ev.on("connection.update", ({ connection, lastDisconnect }) => {
+    if (sock !== s) return; // පරණ socket එකක event නම් ignore
+    if (connection === "close") {
+      const reason = lastDisconnect?.error?.output?.statusCode;
+      console.log("🔌 Connection closed, reason:", reason);
+      if (reason === DisconnectReason.loggedOut) {
+        console.log("❌ Logged out. Reset Session එක ඔබලා ආයෙ pair කරන්න.");
+        return;
+      }
+      if (reason === DisconnectReason.connectionReplaced) {
+        console.log("⚠️ වෙන තැනක (වෙන server/PC එකක) මේ session එකම run වෙනවා! ඒක නවත්තන්න.");
+        return;
+      }
+      scheduleReconnect();
+    } else if (connection === "open") {
+      console.log(`⚡ [CONNECTED] ${CONFIG.BOT_NAME} Online & Ready 🟢`);
+    }
+  });
+
+  s.ev.on("messages.upsert", ({ messages, type }) => {
+    if (type !== "notify") return;
+    for (const msg of messages) handleMessage(s, msg).catch((e) => console.error("Handler error:", e.message));
+  });
+
+  return s;
+}
+
+// ==========================================
+// 4. Web routes
+// ==========================================
+
+app.get("/health", (req, res) => res.json({ ok: true, state: connState }));
+app.get("/status", (req, res) => res.json({ state: connState, commands: commands.size }));
+
 app.get("/reset-session", async (req, res) => {
   try {
+    killSocket();
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     const { clearSession } = await useMongoAuthState();
     await clearSession();
-    if (sock) {
-      try { sock.end(); } catch (e) {}
-      sock = null;
-    }
     messageStore.clear();
+    connState = "idle";
     return res.json({ success: true, message: "Cleared! Ready for new code" });
   } catch (err) {
     return res.status(500).json({ error: err.message });
@@ -135,191 +341,162 @@ app.get("/reset-session", async (req, res) => {
 app.get("/get-code", async (req, res) => {
   const { num } = req.query;
   if (!num) return res.status(400).json({ error: "Missing number" });
-
   try {
-    const cleanNum = num.replace(/[^0-9]/g, "");
-    if (sock) {
-      try { sock.end(); } catch (e) {}
-      sock = null;
-      await delay(1000);
-    }
+    const cleanNum = String(num).replace(/[^0-9]/g, "");
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
 
-    const { state, saveCreds } = await useMongoAuthState();
-
-    const pairSock = makeWASocket({
-      auth: {
-        creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" }))
-      },
-      printQRInTerminal: false,
-      logger: pino({ level: "silent" }),
-      browser: Browsers.macOS("Chrome"),
-      defaultQueryTimeoutMs: 60000,
-      getMessage: async (key) => messageStore.get(key.id) || undefined
-    });
-
-    pairSock.ev.on("creds.update", saveCreds);
-
-    if (!pairSock.authState.creds.registered) {
-      await delay(3000);
-      const code = await pairSock.requestPairingCode(cleanNum);
-      const formattedCode = code?.match(/.{1,4}/g)?.join("-") || code;
-
-      sock = pairSock;
-      initEvents(sock, saveCreds);
-      return res.json({ code: formattedCode });
-    } else {
-      sock = pairSock;
-      initEvents(sock, saveCreds);
+    // දැනටමත් link වෙලා online නම් socket එක අලුත් කරන්නෙ නෑ
+    if (sock && connState === "open" && sock.authState?.creds?.registered) {
       return res.json({ code: "Already Linked & Online" });
     }
+
+    const s = await createSocket();
+    if (!s.authState.creds.registered) {
+      await delay(3000);
+      const code = await s.requestPairingCode(cleanNum);
+      return res.json({ code: code?.match(/.{1,4}/g)?.join("-") || code });
+    }
+    return res.json({ code: "Already Linked & Online" });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
 });
 
 // ==========================================
-// 3. Core Event Engine & Message Router
+// 4. Message router
 // ==========================================
-function initEvents(waSock, saveCreds) {
-  waSock.ev.on("creds.update", saveCreds);
+const idOf = (jid) => String(jid || "").split("@")[0].split(":")[0].replace(/[^0-9]/g, "");
 
-  waSock.ev.on("connection.update", (update) => {
-    const { connection, lastDisconnect } = update;
-    if (connection === "close") {
-      const reason = lastDisconnect?.error?.output?.statusCode;
-      if (reason !== DisconnectReason.loggedOut) {
-        setTimeout(startBot, 3000);
-      }
-    } else if (connection === "open") {
-      console.log(`⚡ [CONNECTED] ${CONFIG.BOT_NAME} Online & Ready 🟢`);
+async function handleMessage(waSock, msg) {
+  if (!msg?.message || !msg?.key) return;
+  const id = msg.key.id;
+
+  // Retry queries වලට cache කරගන්න
+  if (id) {
+    messageStore.set(id, msg.message);
+    if (messageStore.size > 2000) messageStore.delete(messageStore.keys().next().value);
+  }
+
+  const from = msg.key.remoteJid;
+  if (!from || from === "status@broadcast") return;
+
+  // Restart වුණාම පරණ queued messages නැවත run වීම වළක්වන්න
+  const ts = Number(msg.messageTimestamp) || 0;
+  if (ts && Date.now() / 1000 - ts > 60) return;
+
+  if (id) {
+    if (processed.has(id)) return;
+    processed.add(id);
+    if (processed.size > 2000) processed.delete(processed.values().next().value);
+  }
+
+  const mType = Object.keys(msg.message)[0];
+  const body = (
+    msg.message.conversation ||
+    msg.message.extendedTextMessage?.text ||
+    msg.message[mType]?.caption ||
+    ""
+  ).trim();
+
+  const prefix = CONFIG.PREFIX;
+  if (!body.startsWith(prefix)) return;
+
+  const ownerClean = idOf(CONFIG.OWNER_NUMBER);
+  const myNumber = idOf(waSock.user?.id) || ownerClean;
+  const myLid = idOf(waSock.user?.lid);
+  const sender = msg.key.fromMe ? myNumber : idOf(msg.key.participant || from);
+  const isOwner = msg.key.fromMe || sender === ownerClean || sender === myNumber || (myLid && sender === myLid);
+  if (!isOwner) return;
+
+  const [trigger, ...args] = body.slice(prefix.length).trim().split(/\s+/);
+  const cmdName = (trigger || "").toLowerCase();
+  const command = commands.get(cmdName) || aliases.get(cmdName);
+  if (!command) return;
+
+  // Message yourself chat එකද? (@s.whatsapp.net හෝ @lid)
+  const target = idOf(from);
+  const isSelfChat = !from.endsWith("@g.us") &&
+    (target === ownerClean || target === myNumber || (myLid && target === myLid));
+
+  // Self-chat එකේදී යවන්නෙ ඔයාගේම number JID එකට
+  const jid = isSelfChat && waSock.user?.id ? jidNormalizedUser(waSock.user.id) : from;
+
+  const reply = async (text) => {
+    try {
+      const sent = await waSock.sendMessage(jid, { text: String(text) }, isSelfChat ? {} : { quoted: msg });
+      if (sent?.key?.id) messageStore.set(sent.key.id, sent.message);
+      return sent;
+    } catch (e) {
+      console.error("Reply Error:", e.message);
     }
-  });
+  };
 
-  waSock.ev.on("messages.upsert", async ({ messages, type }) => {
-    if (type !== "notify") return;
-    const msg = messages[0];
-    if (!msg?.message || !msg?.key) return;
-
-    // Store message to answer retry queries (Anti Waiting-For-Message)
-    if (msg.key.id) {
-      messageStore.set(msg.key.id, msg.message);
-      if (messageStore.size > 1000) {
-        const firstKey = messageStore.keys().next().value;
-        messageStore.delete(firstKey);
-      }
+  const send = async (content, opts = {}) => {
+    try {
+      const sent = await waSock.sendMessage(jid, content, opts);
+      if (sent?.key?.id) messageStore.set(sent.key.id, sent.message);
+      return sent;
+    } catch (e) {
+      console.error("Send Error:", e.message);
     }
+  };
 
-    const from = msg.key.remoteJid;
-    if (from === "status@broadcast") return;
+  const react = async (emoji) => {
+    if (isSelfChat) return;
+    return waSock.sendMessage(from, { react: { text: emoji, key: msg.key } }).catch(() => {});
+  };
 
-    const mType = Object.keys(msg.message)[0];
-    const body = (
-      msg.message.conversation ||
-      msg.message.extendedTextMessage?.text ||
-      msg.message[mType]?.caption ||
-      ""
-    ).trim();
-
-    // Owner Verification
-    const myCleanNumber = (waSock.user?.id || CONFIG.OWNER_NUMBER).split(":")[0].replace(/[^0-9]/g, "");
-    const rawSender = msg.key.fromMe ? myCleanNumber : (msg.key.participant || from || "");
-    const sender = rawSender.split("@")[0].split(":")[0].replace(/[^0-9]/g, "");
-    const ownerClean = CONFIG.OWNER_NUMBER.replace(/[^0-9]/g, "");
-    const isOwner = msg.key.fromMe || sender === ownerClean || sender === myCleanNumber;
-
-    if (!isOwner) return;
-
-    // Command Check
-    const prefix = CONFIG.PREFIX;
-    if (!body.startsWith(prefix)) return;
-
-    const [cmdTrigger, ...args] = body.slice(prefix.length).trim().split(/\s+/);
-    const cmdName = cmdTrigger.toLowerCase();
-    const command = commands.get(cmdName) || aliases.get(cmdName);
-
-    if (command) {
-      const targetPhone = from.split("@")[0].split(":")[0].replace(/[^0-9]/g, "");
-      const isSelfChat = from.includes("@s.whatsapp.net") && (targetPhone === ownerClean || targetPhone === myCleanNumber);
-
-      // Safe Dispatcher (Self-chat එකේදී crash / waiting නොවී direct යැවීම)
-      const reply = async (text) => {
-        try {
-          const sent = await waSock.sendMessage(from, { text: String(text) }, isSelfChat ? {} : { quoted: msg });
-          if (sent?.key?.id) messageStore.set(sent.key.id, sent.message);
-          return sent;
-        } catch (e) {
-          console.error("Reply Error:", e.message);
-        }
-      };
-
-      // Self-chat එකේදී reaction දැමීමෙන් වළකී (කොළ පාට කොටු නොවෙන්න)
-      const react = async (emoji) => {
-        if (isSelfChat) return; // Prevent reaction glitch in Message Yourself
-        return await waSock.sendMessage(from, { react: { text: emoji, key: msg.key } }).catch(() => {});
-      };
-
-      const context = {
-        sock: waSock,
-        msg,
-        args,
-        text: args.join(" "),
-        body,
-        from,
-        sender,
-        prefix,
-        reply,
-        react,
-        isSelfChat,
-        downloadMedia: () => downloadMediaMessage(msg, "buffer", {}),
-        quoted: msg.message.extendedTextMessage?.contextInfo?.quotedMessage || null
-      };
-
-      try {
-        await command.execute(context);
-      } catch (err) {
-        console.error(`Command [${cmdName}] Error:`, err.message);
-      }
-    }
-  });
+  try {
+    await command.execute({
+      sock: waSock, msg, args, text: args.join(" "), body,
+      from, jid, sender, prefix,
+      reply, send, react, isSelfChat,
+      downloadMedia: () => downloadMediaMessage(msg, "buffer", {}),
+      quoted: msg.message.extendedTextMessage?.contextInfo?.quotedMessage || null
+    });
+  } catch (err) {
+    console.error(`Command [${cmdName}] Error:`, err.message);
+  }
 }
 
 // ==========================================
-// 4. Bot Daemon Starter
+// 5. Start / Shutdown / Keep-alive
 // ==========================================
 async function startBot() {
-  if (isStarting) return;
-  isStarting = true;
-
   try {
     loadPlugins();
-    const { state, saveCreds } = await useMongoAuthState();
+    const { state } = await useMongoAuthState();
     if (state.creds?.registered) {
-      if (sock) {
-        try { sock.end(); } catch (e) {}
-      }
-
-      sock = makeWASocket({
-        auth: {
-          creds: state.creds,
-          keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" }))
-        },
-        printQRInTerminal: false,
-        logger: pino({ level: "silent" }),
-        browser: Browsers.macOS("Chrome"),
-        defaultQueryTimeoutMs: 60000,
-        markOnlineOnConnect: true,
-        // Phone එකෙන් message keys retry කළ විට cache එකෙන් ලබාදීම
-        getMessage: async (key) => messageStore.get(key.id) || undefined
-      });
-
-      initEvents(sock, saveCreds);
+      console.log("♻️ Saved session එක හම්බුණා. Connect වෙනවා...");
+      await createSocket();
+    } else {
+      console.log("ℹ️ තාම pair කරලා නෑ. Web portal එකෙන් pair කරන්න.");
     }
   } catch (e) {
-    console.error("StartBot fatal:", e.message);
-  } finally {
-    isStarting = false;
+    console.error("StartBot error:", e.message);
+    scheduleReconnect(5000);
   }
+}
+
+let shuttingDown = false;
+async function shutdown(sig) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`🛑 ${sig} - session save කරලා නවත්තනවා...`);
+  try {
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    killSocket();
+    await Promise.race([flushWrites(), delay(8000)]);
+  } catch (e) {}
+  process.exit(0);
+}
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+
+// Render වගේ free host වල sleep වීම වළක්වන්න
+const publicUrl = process.env.RENDER_EXTERNAL_URL || process.env.APP_URL;
+if (publicUrl) {
+  setInterval(() => axios.get(`${publicUrl}/health`, { timeout: 10000 }).catch(() => {}), 4 * 60 * 1000);
 }
 
 app.listen(CONFIG.PORT, "0.0.0.0", () => {
