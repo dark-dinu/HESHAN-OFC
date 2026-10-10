@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const pino = require("pino");
+const mongoose = require("mongoose");
 const { 
   makeWASocket, 
   DisconnectReason, 
@@ -57,7 +58,7 @@ function loadPlugins() {
 }
 
 // ==========================================
-// 2. Web UI Pairing Dashboard (No Key Required)
+// 2. Web UI Pairing Dashboard (With Reset Tool)
 // ==========================================
 app.get("/", (req, res) => {
   res.send(`
@@ -72,9 +73,11 @@ app.get("/", (req, res) => {
         .box { background: #0f1622; padding: 2.5rem 2rem; border-radius: 20px; width: 330px; text-align: center; border: 1px solid #1f293d; }
         h1 { margin: 0 0 8px 0; color: #58a6ff; font-size: 1.5rem; }
         input { width: 100%; padding: 12px; margin-bottom: 12px; border: 1px solid #30363d; border-radius: 8px; background: #080c10; color: #fff; box-sizing: border-box; }
-        button { width: 100%; padding: 12px; background: #238636; color: #fff; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.3s; }
+        button { width: 100%; padding: 12px; background: #238636; color: #fff; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.3s; margin-bottom: 10px; }
         button:hover { background: #2ea043; }
-        #code { margin-top: 20px; font-size: 1.5rem; font-weight: bold; color: #38bdf8; letter-spacing: 3px; font-family: monospace; }
+        .reset-btn { background: #da3633; }
+        .reset-btn:hover { background: #f85149; }
+        #code { margin-top: 15px; font-size: 1.4rem; font-weight: bold; color: #38bdf8; letter-spacing: 3px; font-family: monospace; word-break: break-all; }
       </style>
     </head>
     <body>
@@ -83,6 +86,7 @@ app.get("/", (req, res) => {
         <p style="color:#8b949e;font-size:0.85rem;margin-bottom:20px;">Direct Link Portal</p>
         <input type="text" id="phone" placeholder="947xxxxxxxx" required />
         <button id="btn" onclick="fetchCode()">Pair WhatsApp</button>
+        <button class="reset-btn" id="resetBtn" onclick="resetSession()">Reset / Force New Pair</button>
         <div id="code"></div>
       </div>
       <script>
@@ -100,10 +104,40 @@ app.get("/", (req, res) => {
           } catch(e) { display.innerText = 'Server Error'; }
           finally { btn.disabled = false; }
         }
+
+        async function resetSession() {
+          if (!confirm('පරණ Session එක මකා දමා අලුතින් Code එකක් ගන්න අවශ්‍යද?')) return;
+          const display = document.getElementById('code');
+          display.innerText = 'Clearing Session...';
+          try {
+            const res = await fetch('/reset-session');
+            const data = await res.json();
+            display.innerText = data.message || 'Reset Completed!';
+            alert('Session cleared! දැන් නැවත Phone Number එක දී Pair WhatsApp ඔබන්න.');
+          } catch(e) {
+            display.innerText = 'Reset Failed';
+          }
+        }
       </script>
     </body>
     </html>
   `);
+});
+
+// Single-Click Session Clear Route
+app.get("/reset-session", async (req, res) => {
+  try {
+    const AuthModel = mongoose.models.SessionAuth || mongoose.model("SessionAuth");
+    await AuthModel.deleteMany({});
+    if (sock) {
+      try { sock.end(); } catch (e) {}
+      sock = null;
+    }
+    console.log("🧹 [SESSION PURGE] MongoDB Session Cleared Successfully!");
+    return res.json({ success: true, message: "Cleared! Ready for new code" });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 app.get("/get-code", async (req, res) => {
@@ -259,7 +293,7 @@ function initEvents(waSock, saveCreds) {
         }
       };
 
-      // Voice Note Sender Helper (Original WhatsApp Blue Mic Waveform)
+      // Voice Note Sender Helper (PTT Blue Mic Waveform)
       const sendVoice = async (audioBuffer) => {
         return await waSock.sendMessage(from, {
           audio: audioBuffer,
