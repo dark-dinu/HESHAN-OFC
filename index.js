@@ -8,7 +8,9 @@ const {
   makeCacheableSignalKeyStore, 
   Browsers,
   delay,
-  downloadMediaMessage 
+  downloadMediaMessage,
+  generateWAMessageFromContent,
+  proto
 } = require("@whiskeysockets/baileys");
 const { useMongoAuthState } = require("./database/mongoSession");
 const config = require("./config");
@@ -237,6 +239,29 @@ function initEvents(waSock, saveCreds) {
       const targetPhone = from.split("@")[0].split(":")[0].replace(/[^0-9]/g, "");
       const isSelfChat = from.includes("@s.whatsapp.net") && (targetPhone === ownerClean || targetPhone === myCleanNumber);
 
+      // 100% Anti-"Waiting for this message" Dispatcher
+      const reply = async (text) => {
+        try {
+          if (isSelfChat) {
+            // Relay direct conversation packet to bypass broken Signal ratchets in Message Yourself
+            const waMsg = generateWAMessageFromContent(
+              from,
+              proto.Message.fromObject({
+                conversation: String(text)
+              }),
+              { userJid: waSock.user.id }
+            );
+            return await waSock.relayMessage(from, waMsg.message, {
+              messageId: waMsg.key.id
+            });
+          } else {
+            return await waSock.sendMessage(from, { text: String(text) }, { quoted: msg });
+          }
+        } catch (e) {
+          return await waSock.sendMessage(from, { text: String(text) }).catch(() => {});
+        }
+      };
+
       const context = {
         sock: waSock,
         msg,
@@ -247,8 +272,7 @@ function initEvents(waSock, saveCreds) {
         sender,
         prefix,
         config,
-        // Self-chat එකකදී "Waiting for this message" නොවීමට quoted metadata ඉවත් කර direct text යවයි
-        reply: (text) => waSock.sendMessage(from, { text }, isSelfChat ? {} : { quoted: msg }),
+        reply,
         react: (emoji) => waSock.sendMessage(from, { react: { text: emoji, key: msg.key } }).catch(() => {}),
         downloadMedia: () => downloadMediaMessage(msg, "buffer", {}),
         quoted: msg.message.extendedTextMessage?.contextInfo?.quotedMessage || null
@@ -287,7 +311,10 @@ async function startBot() {
         logger: pino({ level: "fatal" }),
         browser: Browsers.macOS("Chrome"),
         defaultQueryTimeoutMs: 60000,
-        markOnlineOnConnect: true
+        markOnlineOnConnect: true,
+        // E2EE drop වීම වළක්වන Socket configs
+        emitOwnEvents: true,
+        generateHighQualityLinkPreview: true
       });
 
       initEvents(sock, saveCreds);
