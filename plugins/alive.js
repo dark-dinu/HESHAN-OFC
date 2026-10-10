@@ -5,13 +5,13 @@ module.exports = {
   name: "alive",
   aliases: ["bot", "info"],
   description: "Bot status and owner card",
-  async execute({ sock, from, react, reply }) {
-    react("👨🏻‍💻").catch(() => {});
+  async execute({ sock, jid, react, reply }) {
+    react("👤").catch(() => {});
 
     const captionText = 
 `👨🏻‍💻⃝➥❬ ʜᴇꜱʜᴀɴ ᴏꜰᴄ ❭
 
-> *➥ɴᴀᴍᴇ ◅◇▻ 𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂 👨🏻‍💻*
+> *➥ɴᴀᴍᴇ ◅◇▻ 𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂 👑*
 > *➥ꜰʀᴏᴍ ◅◇▻ 𝐄𝐌𝐁𝐈𝐋𝐈𝐏𝐈𝐓𝐈𝐘𝐀 ☘️*
 > *➥ᴀɢᴇ   ◅◇▻ 19 📍*
 > *➥ɢᴇɴᴅᴇʀ ◅◇▻ 𝐁𝐎𝐘 👤*
@@ -26,7 +26,7 @@ module.exports = {
 
       // 1. Web URL එකක් නම්
       if (typeof logoPath === "string" && (logoPath.startsWith("http://") || logoPath.startsWith("https://"))) {
-        return await sock.sendMessage(from, {
+        return await sock.sendMessage(jid, {
           image: { url: logoPath },
           caption: captionText
         });
@@ -34,7 +34,7 @@ module.exports = {
 
       // 2. Local File එකක් නම්
       if (typeof logoPath === "string" && fs.existsSync(logoPath)) {
-        return await sock.sendMessage(from, {
+        return await sock.sendMessage(jid, {
           image: fs.readFileSync(logoPath),
           caption: captionText
         });
