@@ -1,69 +1,94 @@
 const mongoose = require("mongoose");
 const { proto, initAuthCreds, BufferJSON } = require("@whiskeysockets/baileys");
 
-const MONGO_URI = process.env.MONGODB_URI || "mongodb+srv://diniduheshan40_db_user:Heshan2007@cluster0.5gazebm.mongodb.net/HESHAN-MD?retryWrites=true&w=majority&appName=Cluster0";
-
-const AuthSchema = new mongoose.Schema({
-  id: { type: String, required: true, unique: true },
-  data: { type: String, required: true }
-});
-
-const AuthModel = mongoose.models.SessionAuth || mongoose.model("SessionAuth", AuthSchema);
-
-let isConnected = false;
-
-async function connectMongo() {
-  if (!isConnected) {
-    await mongoose.connect(MONGO_URI);
-    isConnected = true;
-    console.log("⚡ [DATABASE] MongoDB Atlas Connected Successfully");
-  }
+// ⚠️ Password එක code එකේ ලියන්න එපා. Render > Environment > MONGODB_URI
+const MONGO_URI = process.env.MONGODB_URI;
+if (!MONGO_URI) {
+  console.error("❌ MONGODB_URI environment variable එක set කරලා නෑ!");
+  process.exit(1);
 }
 
-// In-Memory Fast Cache Layer (C++ speed key-value lookup)
+const AuthModel =
+  mongoose.models.SessionAuth ||
+  mongoose.model(
+    "SessionAuth",
+    new mongoose.Schema({
+      id: { type: String, required: true, unique: true },
+      data: { type: String, required: true }
+    })
+  );
+
+let connecting = null;
+function connectMongo() {
+  if (!connecting) {
+    connecting = mongoose
+      .connect(MONGO_URI, { serverSelectionTimeoutMS: 20000 })
+      .then(() => console.log("⚡ [DATABASE] MongoDB Connected"))
+      .catch((e) => {
+        connecting = null; // ඊළඟ වතාවේ ආයෙ try කරන්න
+        throw e;
+      });
+  }
+  return connecting;
+}
+
 const memoryCache = new Map();
+const writeQueue = new Map(); // key එකකට writes පිළිවෙලට
+
+function enqueue(id, job) {
+  const prev = writeQueue.get(id) || Promise.resolve();
+  const next = prev
+    .catch(() => {})
+    .then(job)
+    .catch((e) => console.error(`DB error (${id}):`, e.message));
+  writeQueue.set(id, next);
+  next.finally(() => {
+    if (writeQueue.get(id) === next) writeQueue.delete(id);
+  });
+  return next;
+}
+
+// Restart / SIGTERM වෙද්දී pending writes ඔක්කොම DB එකට යනකම් බලන් ඉන්න
+async function flushWrites() {
+  while (writeQueue.size) await Promise.all([...writeQueue.values()]);
+}
 
 async function useMongoAuthState() {
   await connectMongo();
 
-  const writeData = async (data, id) => {
-    try {
-      memoryCache.set(id, data);
-      const serialized = JSON.stringify(data, BufferJSON.replacer);
-      await AuthModel.updateOne({ id }, { data: serialized }, { upsert: true });
-    } catch (err) {
-      console.error(`Save error (${id}):`, err.message);
-    }
+  const writeData = (data, id) => {
+    memoryCache.set(id, data);
+    const serialized = JSON.stringify(data, BufferJSON.replacer);
+    return enqueue(id, () => AuthModel.updateOne({ id }, { data: serialized }, { upsert: true }));
   };
 
   const readData = async (id) => {
+    if (memoryCache.has(id)) return memoryCache.get(id);
     try {
-      if (memoryCache.has(id)) return memoryCache.get(id);
       const record = await AuthModel.findOne({ id }).lean();
       if (!record?.data) return null;
       const parsed = JSON.parse(record.data, BufferJSON.reviver);
       memoryCache.set(id, parsed);
       return parsed;
     } catch (err) {
+      console.error(`Read error (${id}):`, err.message);
       return null;
     }
   };
 
-  const removeData = async (id) => {
-    try {
-      memoryCache.delete(id);
-      await AuthModel.deleteOne({ id });
-    } catch (err) {
-      console.error(`Remove error (${id}):`, err.message);
-    }
+  const removeData = (id) => {
+    memoryCache.delete(id);
+    return enqueue(id, () => AuthModel.deleteOne({ id }));
   };
 
   const clearSession = async () => {
+    await flushWrites();
     memoryCache.clear();
     await AuthModel.deleteMany({});
   };
 
   const creds = (await readData("creds")) || initAuthCreds();
+  memoryCache.set("creds", creds);
 
   return {
     state: {
@@ -88,11 +113,7 @@ async function useMongoAuthState() {
             for (const id in data[category]) {
               const value = data[category][id];
               const key = `${category}-${id}`;
-              if (value) {
-                tasks.push(writeData(value, key));
-              } else {
-                tasks.push(removeData(key));
-              }
+              tasks.push(value ? writeData(value, key) : removeData(key));
             }
           }
           await Promise.all(tasks);
@@ -104,4 +125,4 @@ async function useMongoAuthState() {
   };
 }
 
-module.exports = { useMongoAuthState, connectMongo };
+module.exports = { useMongoAuthState, connectMongo, flushWrites };
