@@ -146,13 +146,24 @@ app.get("/get-code", async (req, res) => {
 function initEvents(waSock, saveCreds) {
   waSock.ev.on("creds.update", saveCreds);
 
-  // Hook Status Watcher
-  try {
-    const statusPlugin = require("./plugins/status");
-    if (statusPlugin && statusPlugin.initStatusWatcher) {
-      statusPlugin.initStatusWatcher(waSock);
-    }
-  } catch (e) {}
+  // Background Services Hook
+  const triggerBackgroundDaemons = () => {
+    try {
+      const statusPlugin = require("./plugins/status");
+      if (statusPlugin && statusPlugin.initStatusWatcher) {
+        statusPlugin.initStatusWatcher(waSock);
+      }
+    } catch (e) {}
+
+    try {
+      const timemgsPlugin = require("./plugins/timemgs");
+      if (timemgsPlugin && timemgsPlugin.startScheduleDaemon) {
+        timemgsPlugin.startScheduleDaemon(waSock);
+      }
+    } catch (e) {}
+  };
+
+  triggerBackgroundDaemons();
 
   waSock.ev.on("connection.update", (update) => {
     const { connection, lastDisconnect } = update;
@@ -163,12 +174,7 @@ function initEvents(waSock, saveCreds) {
       }
     } else if (connection === "open") {
       console.log(`⚡ ${config.BOT_NAME} Connected & Operational 🟢`);
-      try {
-        const statusPlugin = require("./plugins/status");
-        if (statusPlugin && statusPlugin.initStatusWatcher) {
-          statusPlugin.initStatusWatcher(waSock);
-        }
-      } catch (e) {}
+      triggerBackgroundDaemons();
     }
   });
 
