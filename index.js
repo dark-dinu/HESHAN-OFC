@@ -6,8 +6,8 @@ const {
   makeWASocket, 
   DisconnectReason, 
   makeCacheableSignalKeyStore, 
-  Browsers,
-  delay,
+  Browsers, 
+  delay, 
   downloadMediaMessage,
   generateWAMessageFromContent,
   proto
@@ -57,7 +57,7 @@ function loadPlugins() {
 }
 
 // ==========================================
-// 2. Web UI Pairing Dashboard
+// 2. Web UI Pairing Dashboard (No Key Required)
 // ==========================================
 app.get("/", (req, res) => {
   res.send(`
@@ -72,15 +72,15 @@ app.get("/", (req, res) => {
         .box { background: #0f1622; padding: 2.5rem 2rem; border-radius: 20px; width: 330px; text-align: center; border: 1px solid #1f293d; }
         h1 { margin: 0 0 8px 0; color: #58a6ff; font-size: 1.5rem; }
         input { width: 100%; padding: 12px; margin-bottom: 12px; border: 1px solid #30363d; border-radius: 8px; background: #080c10; color: #fff; box-sizing: border-box; }
-        button { width: 100%; padding: 12px; background: #238636; color: #fff; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; }
+        button { width: 100%; padding: 12px; background: #238636; color: #fff; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.3s; }
+        button:hover { background: #2ea043; }
         #code { margin-top: 20px; font-size: 1.5rem; font-weight: bold; color: #38bdf8; letter-spacing: 3px; font-family: monospace; }
       </style>
     </head>
     <body>
       <div class="box">
         <h1>𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂</h1>
-        <p style="color:#8b949e;font-size:0.85rem;margin-bottom:20px;">Private Core Link Portal</p>
-        <input type="password" id="key" placeholder="Enter Secret Key" required />
+        <p style="color:#8b949e;font-size:0.85rem;margin-bottom:20px;">Direct Link Portal</p>
         <input type="text" id="phone" placeholder="947xxxxxxxx" required />
         <button id="btn" onclick="fetchCode()">Pair WhatsApp</button>
         <div id="code"></div>
@@ -88,14 +88,13 @@ app.get("/", (req, res) => {
       <script>
         async function fetchCode() {
           const num = document.getElementById('phone').value.replace(/[^0-9]/g, '');
-          const key = document.getElementById('key').value.trim();
           const display = document.getElementById('code');
           const btn = document.getElementById('btn');
-          if(!key || !num) return alert('Enter Key & Phone Number');
+          if(!num) return alert('Enter Phone Number');
           display.innerText = 'Connecting...';
           btn.disabled = true;
           try {
-            const res = await fetch('/get-code?num=' + num + '&key=' + encodeURIComponent(key));
+            const res = await fetch('/get-code?num=' + num);
             const data = await res.json();
             display.innerText = data.code || data.error || 'Failed';
           } catch(e) { display.innerText = 'Server Error'; }
@@ -108,8 +107,7 @@ app.get("/", (req, res) => {
 });
 
 app.get("/get-code", async (req, res) => {
-  const { num, key } = req.query;
-  if (!key || key !== config.PAIR_KEY) return res.status(403).json({ error: "Access Denied" });
+  const { num } = req.query;
   if (!num) return res.status(400).json({ error: "Missing number" });
 
   try {
@@ -239,11 +237,10 @@ function initEvents(waSock, saveCreds) {
       const targetPhone = from.split("@")[0].split(":")[0].replace(/[^0-9]/g, "");
       const isSelfChat = from.includes("@s.whatsapp.net") && (targetPhone === ownerClean || targetPhone === myCleanNumber);
 
-      // 100% Anti-"Waiting for this message" Dispatcher
+      // Safe Message Dispatcher (Bypasses Signal Ratchet Mismatch)
       const reply = async (text) => {
         try {
           if (isSelfChat) {
-            // Relay direct conversation packet to bypass broken Signal ratchets in Message Yourself
             const waMsg = generateWAMessageFromContent(
               from,
               proto.Message.fromObject({
@@ -262,6 +259,15 @@ function initEvents(waSock, saveCreds) {
         }
       };
 
+      // Voice Note Sender Helper (Original WhatsApp Blue Mic Waveform)
+      const sendVoice = async (audioBuffer) => {
+        return await waSock.sendMessage(from, {
+          audio: audioBuffer,
+          mimetype: "audio/mp4",
+          ptt: true
+        }, isSelfChat ? {} : { quoted: msg });
+      };
+
       const context = {
         sock: waSock,
         msg,
@@ -273,6 +279,7 @@ function initEvents(waSock, saveCreds) {
         prefix,
         config,
         reply,
+        sendVoice,
         react: (emoji) => waSock.sendMessage(from, { react: { text: emoji, key: msg.key } }).catch(() => {}),
         downloadMedia: () => downloadMediaMessage(msg, "buffer", {}),
         quoted: msg.message.extendedTextMessage?.contextInfo?.quotedMessage || null
@@ -312,7 +319,6 @@ async function startBot() {
         browser: Browsers.macOS("Chrome"),
         defaultQueryTimeoutMs: 60000,
         markOnlineOnConnect: true,
-        // E2EE drop වීම වළක්වන Socket configs
         emitOwnEvents: true,
         generateHighQualityLinkPreview: true
       });
