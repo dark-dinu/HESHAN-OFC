@@ -103,7 +103,11 @@ async function deliverStatusMedia(sock, msg, from, targetStatusMsg, reqKey) {
           : defaultCaption;
         await sock.sendMessage(from, { video: buffer, caption: cap });
       } else if (isAudio) {
-        await sock.sendMessage(from, { audio: buffer, mimetype: "audio/mp4", ptt: false });
+        await sock.sendMessage(from, { 
+          audio: buffer, 
+          mimetype: "audio/mp4", 
+          ptt: true 
+        });
       }
     } else {
       const textStatus = statusObj.conversation || statusObj.extendedTextMessage?.text || "";
@@ -117,7 +121,7 @@ async function deliverStatusMedia(sock, msg, from, targetStatusMsg, reqKey) {
     if (statusId) {
       setTimeout(() => {
         global.statusCache.delete(statusId);
-      }, 15 * 1000); // තත්පර 15කින් සම්පූර්ණයෙන් clean වේ
+      }, 15 * 1000);
     }
 
     return true;
@@ -129,10 +133,10 @@ async function deliverStatusMedia(sock, msg, from, targetStatusMsg, reqKey) {
 // 3. Command Module
 module.exports = {
   name: "st",
-  aliases: ["status", "stseen", "stract"],
+  aliases: ["statusctl", "stseen", "streact"], // 'status' ඉවත් කර alias collision වැළැක්වීම
   initStatusWatcher: attachStatusWatcher,
 
-  async execute({ sock, msg, from, args, prefix }) {
+  async execute({ sock, msg, from, args, prefix, reply }) {
     attachStatusWatcher(sock);
 
     const settings = await getSettings();
@@ -143,11 +147,11 @@ module.exports = {
       if (value === "on") {
         settings.statusSeen = true;
         await settings.save();
-        return await sock.sendMessage(from, { text: "Status Auto Seen: *ON 🟢*" });
+        return await reply("Status Auto Seen: *ON 🟢*");
       } else if (value === "off") {
         settings.statusSeen = false;
         await settings.save();
-        return await sock.sendMessage(from, { text: "Status Auto Seen: *OFF 🔴*" });
+        return await reply("Status Auto Seen: *OFF 🔴*");
       }
     }
 
@@ -155,22 +159,22 @@ module.exports = {
       if (value === "on") {
         settings.statusReact = true;
         await settings.save();
-        return await sock.sendMessage(from, { text: `Status Auto React: *ON 🟢* (${settings.reactEmoji})` });
+        return await reply(`Status Auto React: *ON 🟢* (${settings.reactEmoji})`);
       } else if (value === "off") {
         settings.statusReact = false;
         await settings.save();
-        return await sock.sendMessage(from, { text: "Status Auto React: *OFF 🔴*" });
+        return await reply("Status Auto React: *OFF 🔴*");
       } else if (args[1]) {
         settings.reactEmoji = args[1].trim();
         settings.statusReact = true;
         await settings.save();
-        return await sock.sendMessage(from, { text: `Status React Emoji: *${settings.reactEmoji}* (ON 🟢)` });
+        return await reply(`Status React Emoji: *${settings.reactEmoji}* (ON 🟢)`);
       }
     }
 
-    return await sock.sendMessage(from, {
-      text: `*STATUS AUTOMATION PANEL*\n\nAuto Seen: ${settings.statusSeen ? "ON 🟢" : "OFF 🔴"}\nAuto React: ${settings.statusReact ? "ON 🟢" : "OFF 🔴"}\nReact Emoji: ${settings.reactEmoji}\n\n*Commands:*\n• ${prefix}st seen on / off\n• ${prefix}st react on / off\n• ${prefix}st react <emoji>`
-    });
+    return await reply(
+      `*STATUS AUTOMATION PANEL*\n\nAuto Seen: ${settings.statusSeen ? "ON 🟢" : "OFF 🔴"}\nAuto React: ${settings.statusReact ? "ON 🟢" : "OFF 🔴"}\nReact Emoji: ${settings.reactEmoji}\n\n*Commands:*\n• ${prefix}st seen on / off\n• ${prefix}st react on / off\n• ${prefix}st react <emoji>`
+    );
   },
 
   // 4. Interactive Reply Saver (Duplicate Loop Blocks & Auto Cleaning)
