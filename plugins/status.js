@@ -2,237 +2,225 @@ const { downloadMediaMessage } = require("@whiskeysockets/baileys");
 const { getSettings } = require("../database/settingsModel");
 const config = require("../config");
 
-// Save triggers
-const SAVE_TRIGGERS = [
-  "ඔනි", "ඕනි", "එවන්න", "දෙන්න", "දීපන්", "දාපන්",
-  "oni", "ona", "ewanna", "evanna", "danna", "dapan", "ewapan", "diyan", 
-  "save", "ewannako", "dannako", "send", "denna", "one"
-];
+// Global Cache & Socket Tracker
+global.statusCache = global.statusCache || new Map();
+global.statusHookedSockets = global.statusHookedSockets || new WeakSet();
 
-// Status message cache (පැය 24ක් තබා ගනී)
-if (!global.statusCache) {
-  global.statusCache = new Map();
-}
-
-let isWatcherInitialized = false;
-
-function initStatusWatcher(sock) {
-  if (isWatcherInitialized || !sock) return;
-  isWatcherInitialized = true;
-  console.log("⚡ [STATUS ENGINE] 100% Synchronized & Running");
+// 1. Status Automation Watcher (Auto Seen & Auto React)
+function attachStatusWatcher(sock) {
+  if (!sock || global.statusHookedSockets.has(sock)) return;
+  global.statusHookedSockets.add(sock);
+  console.log("⚡ [STATUS ENGINE] Watcher Successfully Hooked");
 
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
-    if (type !== "notify") return;
-    const msg = messages[0];
-    if (!msg?.message || !msg?.key) return;
+    for (const m of messages) {
+      if (!m?.message || !m?.key) continue;
 
-    const from = msg.key.remoteJid;
+      // Status Broadcast Messages පමණක් අල්ලා ගැනීම
+      if (m.key.remoteJid === "status@broadcast") {
+        const statusId = m.key.id;
+        const participant = m.key.participant || m.participant;
 
-    // ==========================================
-    // 1. STATUS BROADCAST (Seen & Auto React)
-    // ==========================================
-    if (from === "status@broadcast") {
-      const statusId = msg.key.id;
-      const participant = msg.key.participant;
-
-      if (!statusId || !participant) return;
-
-      // Cache the status
-      global.statusCache.set(statusId, msg);
-      setTimeout(() => global.statusCache.delete(statusId), 24 * 60 * 60 * 1000);
-
-      // තමන් දාන status නම් skip
-      if (msg.key.fromMe) return;
-
-      try {
-        const settings = await getSettings();
-
-        // A. AUTO SEEN
-        if (settings.statusSeen) {
-          await sock.readMessages([
-            {
-              remoteJid: "status@broadcast",
-              id: statusId,
-              participant: participant
-            }
-          ]);
-          console.log(`👁️ [SEEN] Status from ${participant.split("@")[0]}`);
+        // Status Message එක Memory Cache කිරීම (Save/Send requests සඳහා)
+        if (statusId) {
+          global.statusCache.set(statusId, m);
+          if (global.statusCache.size > 2000) {
+            const firstKey = global.statusCache.keys().next().value;
+            global.statusCache.delete(firstKey);
+          }
         }
 
-        // B. AUTO REACT (😘)
-        if (settings.statusReact) {
-          const emoji = settings.reactEmoji || "😘";
-          await sock.sendMessage(
-            "status@broadcast",
-            {
-              react: {
-                text: emoji,
-                key: {
-                  remoteJid: "status@broadcast",
-                  id: statusId,
-                  participant: participant,
-                  fromMe: false
+        // තමන්ගේම Status නම් Auto Seen / React නොකරන්න
+        if (m.key.fromMe) continue;
+
+        try {
+          const settings = await getSettings();
+
+          // A. 100% Status Auto Seen (Read Receipt)
+          if (settings.statusSeen) {
+            await sock.readMessages([m.key]).catch(() => {});
+          }
+
+          // B. Auto React (😘)
+          if (settings.statusReact && participant) {
+            const emoji = settings.reactEmoji || "😘";
+            await sock.sendMessage(
+              "status@broadcast",
+              {
+                react: {
+                  text: emoji,
+                  key: m.key
                 }
-              }
-            },
-            { statusJidList: [participant] }
-          );
-          console.log(`😘 [REACT] Reacted ${emoji} to${participant.split("@")[0]}`);
-        }
-      } catch (err) {
-        console.error("❌ Status seen/react error:", err.message);
+              },
+              { statusJidList: [participant] }
+            ).catch(() => {});
+          }
+        } catch (err) {}
       }
-      return;
-    }
-
-    // ==========================================
-    // 2. STATUS SAVER & SENDER (oni, ewanna, etc.)
-    // ==========================================
-    const mType = Object.keys(msg.message)[0];
-    const text = (
-      msg.message.conversation ||
-      msg.message.extendedTextMessage?.text ||
-      msg.message[mType]?.caption ||
-      ""
-    ).trim().toLowerCase();
-
-    if (!text) return;
-
-    // Check Trigger
-    const isTrigger = SAVE_TRIGGERS.some(trig => text === trig || text.startsWith(trig + " "));
-    if (!isTrigger) return;
-
-    const contextInfo = msg.message.extendedTextMessage?.contextInfo;
-    if (!contextInfo || !contextInfo.quotedMessage) return;
-
-    const quotedId = contextInfo.stanzaId;
-    const quotedParticipant = contextInfo.participant;
-    const quotedMsg = contextInfo.quotedMessage;
-
-    // Status එකකට reply කර ඇති බව තහවුරු කර ගැනීම
-    const isStatusQuoted = 
-      contextInfo.remoteJid === "status@broadcast" || 
-      (quotedParticipant && !from.endsWith("@g.us") && !quotedParticipant.endsWith("@s.whatsapp.net")) ||
-      global.statusCache.has(quotedId);
-
-    // Media Object එක නිවැරදිව සකස් කිරීම
-    const rawTarget = global.statusCache.get(quotedId);
-    const downloadTarget = rawTarget || {
-      key: {
-        remoteJid: "status@broadcast",
-        id: quotedId,
-        participant: quotedParticipant
-      },
-      message: quotedMsg
-    };
-
-    const targetType = Object.keys(downloadTarget.message)[0];
-    const myCleanNumber = config.OWNER_NUMBER.replace(/[^0-9]/g, "");
-    const myJid = `${myCleanNumber}@s.whatsapp.net`;
-    const senderNumber = (msg.key.participant || from).split("@")[0].replace(/[^0-9]/g, "");
-    const isOwnerAsking = msg.key.fromMe || senderNumber === myCleanNumber;
-
-    // Destination:
-    // මම ඉල්ලුවොත් ➔ මගේ Chat එකට (Saved messages / self chat)
-    // වෙන කෙනෙක් මගෙන් ඉල්ලුවොත් ➔ ඒ කෙනාගේ Chat එකට
-    const destination = isOwnerAsking ? myJid : from;
-
-    try {
-      if (targetType === "imageMessage") {
-        const buffer = await downloadMediaMessage(downloadTarget, "buffer", {});
-        await sock.sendMessage(
-          destination,
-          {
-            image: buffer,
-            caption: downloadTarget.message.imageMessage?.caption || ""
-          },
-          !isOwnerAsking ? { quoted: msg } : {}
-        );
-        console.log(`✅ [SAVER] Image status sent to ${destination}`);
-      } else if (targetType === "videoMessage") {
-        const buffer = await downloadMediaMessage(downloadTarget, "buffer", {});
-        await sock.sendMessage(
-          destination,
-          {
-            video: buffer,
-            caption: downloadTarget.message.videoMessage?.caption || ""
-          },
-          !isOwnerAsking ? { quoted: msg } : {}
-        );
-        console.log(`✅ [SAVER] Video status sent to ${destination}`);
-      } else if (targetType === "extendedTextMessage" || targetType === "conversation") {
-        const str = downloadTarget.message.extendedTextMessage?.text || downloadTarget.message.conversation || "";
-        await sock.sendMessage(
-          destination,
-          { text: str },
-          !isOwnerAsking ? { quoted: msg } : {}
-        );
-        console.log(`✅ [SAVER] Text status sent to ${destination}`);
-      }
-    } catch (err) {
-      console.error("❌ Status media download/send failed:", err.message);
     }
   });
 }
 
-// ==========================================
-// 3. COMMAND INTERFACE (.st seen on/off)
-// ==========================================
+// 2. Status Media Delivery Engine (Photo, Video, Audio, Text)
+async function deliverStatusMedia(sock, msg, from, targetStatusMsg) {
+  try {
+    await sock.sendMessage(from, { react: { text: "⏳", key: msg.key } }).catch(() => {});
+
+    const statusObj = targetStatusMsg.message;
+    const isImage = Boolean(statusObj.imageMessage);
+    const isVideo = Boolean(statusObj.videoMessage);
+    const isAudio = Boolean(statusObj.audioMessage);
+
+    const defaultCaption = "> *⚡ 𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂 𝐒𝐓𝐀𝐓𝐔𝐒 𝐒𝐀𝐕𝐄𝐑 ❄️*";
+
+    if (isImage || isVideo || isAudio) {
+      const buffer = await downloadMediaMessage(
+        targetStatusMsg,
+        "buffer",
+        {},
+        { reuploadRequest: sock.updateMediaMessage }
+      );
+
+      if (!buffer || buffer.length === 0) throw new Error("Media buffer empty");
+
+      if (isImage) {
+        const cap = statusObj.imageMessage.caption 
+          ? `${statusObj.imageMessage.caption}\n\n${defaultCaption}` 
+          : defaultCaption;
+        await sock.sendMessage(from, { image: buffer, caption: cap }, { quoted: msg });
+      } else if (isVideo) {
+        const cap = statusObj.videoMessage.caption 
+          ? `${statusObj.videoMessage.caption}\n\n${defaultCaption}` 
+          : defaultCaption;
+        await sock.sendMessage(from, { video: buffer, caption: cap }, { quoted: msg });
+      } else if (isAudio) {
+        await sock.sendMessage(from, { audio: buffer, mimetype: "audio/mp4", ptt: false }, { quoted: msg });
+      }
+    } else {
+      // Text Status
+      const textStatus = statusObj.conversation || statusObj.extendedTextMessage?.text || "";
+      await sock.sendMessage(from, {
+        text: `📝 *STATUS TEXT:*\n\n${textStatus}\n\n${defaultCaption}`
+      }, { quoted: msg });
+    }
+
+    await sock.sendMessage(from, { react: { text: "✅", key: msg.key } }).catch(() => {});
+    return true;
+  } catch (err) {
+    console.error("[STATUS DELIVER ERROR]:", err.message);
+    await sock.sendMessage(from, { react: { text: "❌", key: msg.key } }).catch(() => {});
+    return false;
+  }
+}
+
+// 3. Status Command Export (𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂 Standards)
 module.exports = {
   name: "st",
-  aliases: ["status"],
-  initStatusWatcher,
-  async execute({ sock, reply, args, prefix, react }) {
-    initStatusWatcher(sock);
-    react("⚙️").catch(() => {});
+  aliases: ["status", "stseen", "stract", "ssave"],
+  category: "utility",
+  description: "Status automation controls and interactive status saver",
+  initStatusWatcher: attachStatusWatcher,
 
-    const sub = (args[0] || "").toLowerCase();
-    const val = (args[1] || "").toLowerCase();
+  async execute({ sock, msg, from, args, prefix, react }) {
+    attachStatusWatcher(sock);
+
     const settings = await getSettings();
+    const subCmd = (args[0] || "").toLowerCase();
+    const value = (args[1] || "").toLowerCase();
 
-    if (sub === "seen") {
-      if (val === "on") {
+    // A. Seen On/Off (.st seen on / off)
+    if (subCmd === "seen") {
+      if (value === "on") {
         settings.statusSeen = true;
         await settings.save();
-        return reply("Status Auto Seen: *ON 🟢* (Saved Permanently)");
-      } else if (val === "off") {
+        react("🟢").catch(() => {});
+        return await sock.sendMessage(from, { text: "Status Auto Seen: *ON 🟢* (Saved)" }, { quoted: msg });
+      } else if (value === "off") {
         settings.statusSeen = false;
         await settings.save();
-        return reply("Status Auto Seen: *OFF 🔴* (Saved Permanently)");
+        react("🔴").catch(() => {});
+        return await sock.sendMessage(from, { text: "Status Auto Seen: *OFF 🔴* (Saved)" }, { quoted: msg });
       }
-      return reply(`භාවිතය: *${prefix}st seen on* හෝ *${prefix}st seen off*`);
+      return await sock.sendMessage(from, { text: `⚠️ භාවිතය: \`${prefix}st seen on\` හෝ \`${prefix}st seen off\`` }, { quoted: msg });
     }
 
-    if (sub === "react") {
-      if (val === "on") {
+    // B. React On/Off / Emoji (.st react on / off / <emoji>)
+    if (subCmd === "react") {
+      if (value === "on") {
         settings.statusReact = true;
         await settings.save();
-        return reply(`Status Auto React: *ON 🟢* (Emoji: ${settings.reactEmoji})`);
-      } else if (val === "off") {
+        react("🟢").catch(() => {});
+        return await sock.sendMessage(from, { text: `Status Auto React: *ON 🟢* (Emoji: ${settings.reactEmoji})` }, { quoted: msg });
+      } else if (value === "off") {
         settings.statusReact = false;
         await settings.save();
-        return reply("Status Auto React: *OFF 🔴* (Saved Permanently)");
+        react("🔴").catch(() => {});
+        return await sock.sendMessage(from, { text: "Status Auto React: *OFF 🔴* (Saved)" }, { quoted: msg });
       } else if (args[1]) {
-        settings.reactEmoji = args[1];
+        settings.reactEmoji = args[1].trim();
         settings.statusReact = true;
         await settings.save();
-        return reply(`Status Auto React Emoji: *${args[1]}* (ON 🟢)`);
+        react(settings.reactEmoji).catch(() => {});
+        return await sock.sendMessage(from, { text: `Status React Emoji Updated: *${settings.reactEmoji}* (ON 🟢)` }, { quoted: msg });
       }
-      return reply(`භාවිතය: *${prefix}st react on* හෝ *${prefix}st react off*`);
+      return await sock.sendMessage(from, { text: `⚠️ භාවිතය: \`${prefix}st react on\` හෝ \`${prefix}st react <emoji>\`` }, { quoted: msg });
     }
 
-    return reply(
-`*❬ 𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂 - STATUS SYSTEM ❭* ⚙️
+    // C. Quoted Status Save via Command (.st reply කර ගැසූ විට)
+    const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+    const quotedId = msg.message?.extendedTextMessage?.contextInfo?.stanzaId;
 
-> *Auto Seen*  : ${settings.statusSeen ? "ON 🟢" : "OFF 🔴"}
-> *Auto React* : ${settings.statusReact ? "ON 🟢" : "OFF 🔴"}
-> *React Emoji*: ${settings.reactEmoji}
-> *Status Saver*: ACTIVE ⚡
+    if (quoted) {
+      const cached = global.statusCache.get(quotedId) || {
+        key: { remoteJid: "status@broadcast", id: quotedId },
+        message: quoted
+      };
+      return await deliverStatusMedia(sock, msg, from, cached);
+    }
 
-*Settings Commands:*
+    // D. Main Dashboard Status Panel
+    return await sock.sendMessage(from, {
+      text: `╔══════════════════════╗
+   👨🏻‍💻 𝐇 𝐄 𝐒 𝐇 𝐀 𝐍  𝐎 𝐅 𝐂 👨🏻‍💻
+╚══════════════════════╝
+
+┌─〔 📺 *STATUS AUTOMATION* 〕
+├─▸ 👁️ *Auto Seen*  : ${settings.statusSeen ? "🟢 ON" : "🔴 OFF"}
+├─▸ 💖 *Auto React* : ${settings.statusReact ? "🟢 ON" : "🔴 OFF"}
+├─▸ 🎭 *React Emoji*: ${settings.reactEmoji}
+└───────────────────────
+
+📌 *පාලනය කිරීමට:*
 • \`${prefix}st seen on / off\`
 • \`${prefix}st react on / off\`
-• \`${prefix}st react <emoji>\``
-    );
+• \`${prefix}st react <emoji>\`
+
+📥 *Status එකක් ලබාගැනීමට:*
+Status එකකට Reply කර *oni*, *ewanna*, *දෙන්න*, *දාපන්* ලෙස යවන්න.`
+    }, { quoted: msg });
+  },
+
+  // 4. Interactive Reply Saver (oni, ewanna, dapan, etc.)
+  async onReply({ sock, msg, from, body, quotedStanzaId }) {
+    const rawWord = body.trim().toLowerCase();
+
+    const triggerWords = [
+      "oni", "ඔනි", "ඕනි", "one", 
+      "ewanna", "එවන්න", "ewapan", "එවපන්", "ewahan", "එවහන්",
+      "dapan", "දාපන්", "danna", "දාන්න", "denna", "දෙන්න", "diyan", "දීපන්",
+      "send", "sendme", "save", "saveme"
+    ];
+
+    if (!triggerWords.includes(rawWord)) return false;
+
+    const quotedMsg = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+    const target = global.statusCache.get(quotedStanzaId) || (quotedMsg ? {
+      key: { remoteJid: "status@broadcast", id: quotedStanzaId },
+      message: quotedMsg
+    } : null);
+
+    if (!target) return false;
+
+    return await deliverStatusMedia(sock, msg, from, target);
   }
 };
