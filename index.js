@@ -10,7 +10,7 @@ const {
   delay, 
   downloadMediaMessage 
 } = require("@whiskeysockets/baileys");
-const { useMongoAuthState, connectMongo } = require("./auth");
+const { useMongoAuthState } = require("./auth");
 
 const app = express();
 app.use(express.json());
@@ -19,17 +19,18 @@ app.use(express.urlencoded({ extended: true }));
 const CONFIG = {
   BOT_NAME: "𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂",
   PREFIX: ",",
-  OWNER_NUMBER: "94719845166", // ඔයාගේ අංකය
+  OWNER_NUMBER: "94719845166",
   PORT: process.env.PORT || 3000
 };
 
 const commands = new Map();
 const aliases = new Map();
+const messageStore = new Map(); // Anti "Waiting for this message" Cache
 let sock = null;
 let isStarting = false;
 
 // ==========================================
-// 1. Hot Plugin Auto-Loader (Zero Restart Needed)
+// 1. Plugins Auto-Loader
 // ==========================================
 function loadPlugins() {
   commands.clear();
@@ -56,18 +57,11 @@ function loadPlugins() {
       console.error(`[Plugin Load Error] ${file}:`, err.message);
     }
   }
-  console.log(`⚡ [CORE] Loaded ${commands.size} commands successfully.`);
+  console.log(`⚡ [CORE] Loaded ${commands.size} commands cleanly.`);
 }
 
-// Background auto-loader for new plugins (Folder එකට file එකක් දැම්ම ගමන් index එකට අත නොතියා auto-load වේ)
-fs.watch(path.join(__dirname, "plugins"), (eventType, filename) => {
-  if (filename && filename.endsWith(".js")) {
-    loadPlugins();
-  }
-});
-
 // ==========================================
-// 2. High-Speed Pairing Web UI
+// 2. High-Speed Web Portal
 // ==========================================
 app.get("/", (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -79,54 +73,43 @@ app.get("/", (req, res) => {
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>${CONFIG.BOT_NAME}</title>
       <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; background: #080c10; color: #fff; margin: 0; padding: 20px; box-sizing: border-box; }
-        .box { background: #0f1622; padding: 2.5rem 2rem; border-radius: 20px; width: 100%; max-width: 340px; text-align: center; border: 1px solid #1f293d; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        body { font-family: -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; background: #080c10; color: #fff; margin: 0; }
+        .box { background: #0f1622; padding: 2.5rem 2rem; border-radius: 20px; width: 100%; max-width: 340px; text-align: center; border: 1px solid #1f293d; }
         h1 { margin: 0 0 8px 0; color: #58a6ff; font-size: 1.6rem; }
-        p { color: #8b949e; font-size: 0.85rem; margin-bottom: 20px; }
-        input { width: 100%; padding: 14px; margin-bottom: 12px; border: 1px solid #30363d; border-radius: 10px; background: #080c10; color: #fff; box-sizing: border-box; font-size: 1rem; outline: none; }
-        input:focus { border-color: #58a6ff; }
-        button { width: 100%; padding: 13px; background: #238636; color: #fff; border: none; border-radius: 10px; font-weight: bold; cursor: pointer; transition: 0.2s; font-size: 1rem; margin-bottom: 10px; }
-        button:hover { background: #2ea043; }
+        input { width: 100%; padding: 14px; margin-bottom: 12px; border: 1px solid #30363d; border-radius: 10px; background: #080c10; color: #fff; box-sizing: border-box; }
+        button { width: 100%; padding: 13px; background: #238636; color: #fff; border: none; border-radius: 10px; font-weight: bold; cursor: pointer; margin-bottom: 10px; }
         .reset-btn { background: #da3633; }
-        .reset-btn:hover { background: #f85149; }
-        #code { margin-top: 15px; font-size: 1.5rem; font-weight: bold; color: #38bdf8; letter-spacing: 4px; font-family: monospace; word-break: break-all; min-height: 35px; }
+        #code { margin-top: 15px; font-size: 1.5rem; font-weight: bold; color: #38bdf8; letter-spacing: 4px; font-family: monospace; }
       </style>
     </head>
     <body>
       <div class="box">
         <h1>${CONFIG.BOT_NAME}</h1>
-        <p>Ultra Fast Link Portal</p>
+        <p style="color:#8b949e">Direct Pair Engine</p>
         <input type="text" id="phone" placeholder="947xxxxxxxx" required />
         <button id="btn" onclick="fetchCode()">Pair WhatsApp</button>
-        <button class="reset-btn" id="resetBtn" onclick="resetSession()">Reset / Force New Pair</button>
+        <button class="reset-btn" onclick="resetSession()">Reset Session</button>
         <div id="code"></div>
       </div>
       <script>
         async function fetchCode() {
           const num = document.getElementById('phone').value.replace(/[^0-9]/g, '');
           const display = document.getElementById('code');
-          const btn = document.getElementById('btn');
           if(!num) return alert('Enter Phone Number');
           display.innerText = 'Connecting...';
-          btn.disabled = true;
           try {
             const res = await fetch('/get-code?num=' + num);
             const data = await res.json();
             display.innerText = data.code || data.error || 'Failed';
           } catch(e) { display.innerText = 'Server Error'; }
-          finally { btn.disabled = false; }
         }
-
         async function resetSession() {
-          if (!confirm('පරණ Session එක මකා දමා අලුතින් Code එකක් ගන්න අවශ්‍යද?')) return;
+          if (!confirm('Clear session and generate new keys?')) return;
           const display = document.getElementById('code');
-          display.innerText = 'Clearing Session...';
-          try {
-            const res = await fetch('/reset-session');
-            const data = await res.json();
-            display.innerText = data.message || 'Reset Completed!';
-            alert('Session Cleared! දැන් අංකය දී Pair WhatsApp ඔබන්න.');
-          } catch(e) { display.innerText = 'Reset Failed'; }
+          display.innerText = 'Clearing...';
+          const res = await fetch('/reset-session');
+          const data = await res.json();
+          display.innerText = data.message || 'Done';
         }
       </script>
     </body>
@@ -142,7 +125,7 @@ app.get("/reset-session", async (req, res) => {
       try { sock.end(); } catch (e) {}
       sock = null;
     }
-    console.log("🧹 [PURGE] Session Cleared Successfully");
+    messageStore.clear();
     return res.json({ success: true, message: "Cleared! Ready for new code" });
   } catch (err) {
     return res.status(500).json({ error: err.message });
@@ -172,7 +155,7 @@ app.get("/get-code", async (req, res) => {
       logger: pino({ level: "silent" }),
       browser: Browsers.macOS("Chrome"),
       defaultQueryTimeoutMs: 60000,
-      connectTimeoutMs: 60000
+      getMessage: async (key) => messageStore.get(key.id) || undefined
     });
 
     pairSock.ev.on("creds.update", saveCreds);
@@ -184,7 +167,6 @@ app.get("/get-code", async (req, res) => {
 
       sock = pairSock;
       initEvents(sock, saveCreds);
-
       return res.json({ code: formattedCode });
     } else {
       sock = pairSock;
@@ -192,15 +174,12 @@ app.get("/get-code", async (req, res) => {
       return res.json({ code: "Already Linked & Online" });
     }
   } catch (err) {
-    console.error("Pairing Error:", err.message);
     return res.status(500).json({ error: err.message });
   }
 });
 
-app.get("/health", (req, res) => res.status(200).send("OK"));
-
 // ==========================================
-// 3. Core Event Engine & Command Dispatcher
+// 3. Core Event Engine & Message Router
 // ==========================================
 function initEvents(waSock, saveCreds) {
   waSock.ev.on("creds.update", saveCreds);
@@ -221,6 +200,15 @@ function initEvents(waSock, saveCreds) {
     if (type !== "notify") return;
     const msg = messages[0];
     if (!msg?.message || !msg?.key) return;
+
+    // Store message to answer retry queries (Anti Waiting-For-Message)
+    if (msg.key.id) {
+      messageStore.set(msg.key.id, msg.message);
+      if (messageStore.size > 1000) {
+        const firstKey = messageStore.keys().next().value;
+        messageStore.delete(firstKey);
+      }
+    }
 
     const from = msg.key.remoteJid;
     if (from === "status@broadcast") return;
@@ -254,26 +242,21 @@ function initEvents(waSock, saveCreds) {
       const targetPhone = from.split("@")[0].split(":")[0].replace(/[^0-9]/g, "");
       const isSelfChat = from.includes("@s.whatsapp.net") && (targetPhone === ownerClean || targetPhone === myCleanNumber);
 
-      // 100% Anti "Waiting for this message" Dispatcher
+      // Safe Dispatcher (Self-chat එකේදී crash / waiting නොවී direct යැවීම)
       const reply = async (text) => {
         try {
-          if (isSelfChat) {
-            // Direct text without quoted headers to prevent Signal Ratchet drops
-            return await waSock.sendMessage(from, { text: String(text) });
-          } else {
-            return await waSock.sendMessage(from, { text: String(text) }, { quoted: msg });
-          }
+          const sent = await waSock.sendMessage(from, { text: String(text) }, isSelfChat ? {} : { quoted: msg });
+          if (sent?.key?.id) messageStore.set(sent.key.id, sent.message);
+          return sent;
         } catch (e) {
           console.error("Reply Error:", e.message);
         }
       };
 
-      const sendVoice = async (audioBuffer) => {
-        return await waSock.sendMessage(from, {
-          audio: audioBuffer,
-          mimetype: "audio/mp4",
-          ptt: true
-        }, isSelfChat ? {} : { quoted: msg });
+      // Self-chat එකේදී reaction දැමීමෙන් වළකී (කොළ පාට කොටු නොවෙන්න)
+      const react = async (emoji) => {
+        if (isSelfChat) return; // Prevent reaction glitch in Message Yourself
+        return await waSock.sendMessage(from, { react: { text: emoji, key: msg.key } }).catch(() => {});
       };
 
       const context = {
@@ -286,8 +269,8 @@ function initEvents(waSock, saveCreds) {
         sender,
         prefix,
         reply,
-        sendVoice,
-        react: (emoji) => waSock.sendMessage(from, { react: { text: emoji, key: msg.key } }).catch(() => {}),
+        react,
+        isSelfChat,
         downloadMedia: () => downloadMediaMessage(msg, "buffer", {}),
         quoted: msg.message.extendedTextMessage?.contextInfo?.quotedMessage || null
       };
@@ -325,7 +308,9 @@ async function startBot() {
         logger: pino({ level: "silent" }),
         browser: Browsers.macOS("Chrome"),
         defaultQueryTimeoutMs: 60000,
-        markOnlineOnConnect: true
+        markOnlineOnConnect: true,
+        // Phone එකෙන් message keys retry කළ විට cache එකෙන් ලබාදීම
+        getMessage: async (key) => messageStore.get(key.id) || undefined
       });
 
       initEvents(sock, saveCreds);
