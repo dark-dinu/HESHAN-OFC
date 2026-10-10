@@ -13,7 +13,7 @@ const {
   generateWAMessageFromContent,
   proto
 } = require("@whiskeysockets/baileys");
-const { useMongoAuthState } = require("./database/mongoSession");
+const { useMongoAuthState, connectMongo } = require("./database/mongoSession");
 const config = require("./config");
 
 const app = express();
@@ -61,6 +61,7 @@ function loadPlugins() {
 // 2. Web UI Pairing Dashboard (With Reset Tool)
 // ==========================================
 app.get("/", (req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(`
     <!DOCTYPE html>
     <html lang="en">
@@ -69,21 +70,23 @@ app.get("/", (req, res) => {
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂</title>
       <style>
-        body { font-family: -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; background: #080c10; color: #fff; margin: 0; }
-        .box { background: #0f1622; padding: 2.5rem 2rem; border-radius: 20px; width: 330px; text-align: center; border: 1px solid #1f293d; }
-        h1 { margin: 0 0 8px 0; color: #58a6ff; font-size: 1.5rem; }
-        input { width: 100%; padding: 12px; margin-bottom: 12px; border: 1px solid #30363d; border-radius: 8px; background: #080c10; color: #fff; box-sizing: border-box; }
-        button { width: 100%; padding: 12px; background: #238636; color: #fff; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.3s; margin-bottom: 10px; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; background: #080c10; color: #fff; margin: 0; padding: 20px; box-sizing: border-box; }
+        .box { background: #0f1622; padding: 2.5rem 2rem; border-radius: 20px; width: 100%; max-width: 340px; text-align: center; border: 1px solid #1f293d; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        h1 { margin: 0 0 8px 0; color: #58a6ff; font-size: 1.6rem; }
+        p { color: #8b949e; font-size: 0.85rem; margin-bottom: 20px; }
+        input { width: 100%; padding: 14px; margin-bottom: 12px; border: 1px solid #30363d; border-radius: 10px; background: #080c10; color: #fff; box-sizing: border-box; font-size: 1rem; outline: none; }
+        input:focus { border-color: #58a6ff; }
+        button { width: 100%; padding: 13px; background: #238636; color: #fff; border: none; border-radius: 10px; font-weight: bold; cursor: pointer; transition: 0.2s; font-size: 1rem; margin-bottom: 10px; }
         button:hover { background: #2ea043; }
         .reset-btn { background: #da3633; }
         .reset-btn:hover { background: #f85149; }
-        #code { margin-top: 15px; font-size: 1.4rem; font-weight: bold; color: #38bdf8; letter-spacing: 3px; font-family: monospace; word-break: break-all; }
+        #code { margin-top: 15px; font-size: 1.5rem; font-weight: bold; color: #38bdf8; letter-spacing: 4px; font-family: monospace; word-break: break-all; min-height: 35px; }
       </style>
     </head>
     <body>
       <div class="box">
         <h1>𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂</h1>
-        <p style="color:#8b949e;font-size:0.85rem;margin-bottom:20px;">Direct Link Portal</p>
+        <p>Direct Link Portal</p>
         <input type="text" id="phone" placeholder="947xxxxxxxx" required />
         <button id="btn" onclick="fetchCode()">Pair WhatsApp</button>
         <button class="reset-btn" id="resetBtn" onclick="resetSession()">Reset / Force New Pair</button>
@@ -114,9 +117,7 @@ app.get("/", (req, res) => {
             const data = await res.json();
             display.innerText = data.message || 'Reset Completed!';
             alert('Session cleared! දැන් නැවත Phone Number එක දී Pair WhatsApp ඔබන්න.');
-          } catch(e) {
-            display.innerText = 'Reset Failed';
-          }
+          } catch(e) { display.innerText = 'Reset Failed'; }
         }
       </script>
     </body>
@@ -124,9 +125,10 @@ app.get("/", (req, res) => {
   `);
 });
 
-// Single-Click Session Clear Route
+// Reset Session Endpoint
 app.get("/reset-session", async (req, res) => {
   try {
+    await connectMongo();
     const AuthModel = mongoose.models.SessionAuth || mongoose.model("SessionAuth");
     await AuthModel.deleteMany({});
     if (sock) {
@@ -140,6 +142,7 @@ app.get("/reset-session", async (req, res) => {
   }
 });
 
+// Direct Get-Code Endpoint
 app.get("/get-code", async (req, res) => {
   const { num } = req.query;
   if (!num) return res.status(400).json({ error: "Missing number" });
@@ -178,6 +181,8 @@ app.get("/get-code", async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
+
+app.get("/health", (req, res) => res.status(200).send("OK"));
 
 // ==========================================
 // 3. Main Event Engine & Message Router
@@ -367,7 +372,7 @@ async function startBot() {
 }
 
 const PORT = process.env.PORT || config.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🌐 Web UI active on port ${PORT}`);
   startBot();
 });
