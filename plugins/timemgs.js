@@ -42,9 +42,17 @@ function startScheduleDaemon(sock) {
             } else if (task.mediaType === "video") {
               await sock.sendMessage(task.targetJid, { video: buffer, caption });
             } else if (task.mediaType === "audio") {
-              await sock.sendMessage(task.targetJid, { audio: buffer, mimetype: "audio/mp4", ptt: false });
+              await sock.sendMessage(task.targetJid, { 
+                audio: buffer, 
+                mimetype: "audio/mp4", 
+                ptt: true 
+              });
             } else if (task.mediaType === "document") {
-              await sock.sendMessage(task.targetJid, { document: buffer, mimetype: "application/octet-stream", fileName: "scheduled_media" });
+              await sock.sendMessage(task.targetJid, { 
+                document: buffer, 
+                mimetype: "application/octet-stream", 
+                fileName: "scheduled_media" 
+              });
             }
           } 
           // 2. Direct Text Deliver
@@ -110,7 +118,7 @@ module.exports = {
   description: "Schedule automated messages to Contacts, Groups, and Channels",
   startScheduleDaemon,
 
-  async execute({ sock, msg, from, args, prefix, react }) {
+  async execute({ sock, msg, from, args, prefix, react, reply }) {
     startScheduleDaemon(sock);
     react("⏱️").catch(() => {});
 
@@ -123,7 +131,7 @@ module.exports = {
     if (args[0]?.toLowerCase() === "list") {
       const allTasks = await ScheduleModel.find();
       if (!allTasks || allTasks.length === 0) {
-        return await sock.sendMessage(from, { text: "📂 සක්‍රීය Schedule Messages කිසිවක් හමු නොවීය." }, { quoted: msg });
+        return await reply("📂 සක්‍රීය Schedule Messages කිසිවක් හමු නොවීය.");
       }
 
       let out = 
@@ -140,7 +148,7 @@ module.exports = {
       });
 
       out += `_මකා දැමීමට: \`${prefix}timemgs del <ID හෝ Number>\`_`;
-      return await sock.sendMessage(from, { text: out }, { quoted: msg });
+      return await reply(out);
     }
 
     // ==========================================
@@ -149,7 +157,7 @@ module.exports = {
     if (args[0]?.toLowerCase() === "del") {
       const deleteKey = args[1]?.trim();
       if (!deleteKey) {
-        return await sock.sendMessage(from, { text: `⚠️ භාවිතය: \`${prefix}timemgs del <ID හෝ Target Number>\`` }, { quoted: msg });
+        return await reply(`⚠️ භාවිතය: \`${prefix}timemgs del <ID හෝ Target Number>\``);
       }
 
       const res = await ScheduleModel.deleteMany({
@@ -161,9 +169,9 @@ module.exports = {
 
       if (res.deletedCount > 0) {
         react("🗑️").catch(() => {});
-        return await sock.sendMessage(from, { text: `🧹 Schedule ${res.deletedCount} ක් සාර්ථකව මකා දමන ලදී.` }, { quoted: msg });
+        return await reply(`🧹 Schedule ${res.deletedCount} ක් සාර්ථකව මකා දමන ලදී.`);
       } else {
-        return await sock.sendMessage(from, { text: `⚠️ \`${deleteKey}\` සඳහා Schedule හමු නොවීය.` }, { quoted: msg });
+        return await reply(`⚠️ \`${deleteKey}\` සඳහා Schedule හමු නොවීය.`);
       }
     }
 
@@ -171,8 +179,7 @@ module.exports = {
     // 3. SET NEW SCHEDULE
     // ==========================================
     if (!rawInput) {
-      return await sock.sendMessage(from, {
-        text: 
+      return await reply(
 `╔══════════════════════╗
    ⏱️ 𝐇 𝐄 𝐒 𝐇 𝐀 𝐍  𝐎 𝐅 𝐂  𝐓 𝐈 𝐌 𝐄 ⏱️
 ╚══════════════════════╝
@@ -192,7 +199,7 @@ _Ex:_ \`${prefix}timemgs https://whatsapp.com/channel/xxx, 10:00\`
 3️⃣ *වෙනත් Orders:*
 • \`${prefix}timemgs list\` (සියලු Schedules බැලීමට)
 • \`${prefix}timemgs del <target/id>\` (මකා දැමීමට)`
-      }, { quoted: msg });
+      );
     }
 
     const segments = rawInput.split(",").map(s => s.trim());
@@ -214,9 +221,7 @@ _Ex:_ \`${prefix}timemgs https://whatsapp.com/channel/xxx, 10:00\`
     // Time validation (24h format HH:mm)
     const timeFormat = /^([01]\d|2[0-3]):([0-5]\d)$/;
     if (!timeFormat.test(scheduledTime)) {
-      return await sock.sendMessage(from, {
-        text: "⚠️ කරුණාකර වේලාව පැය 24 ක්‍රමයට ඇතුළත් කරන්න (Format: `HH:mm` - Ex: `10:00`, `18:30`)."
-      }, { quoted: msg });
+      return await reply("⚠️ කරුණාකර වේලාව පැය 24 ක්‍රමයට ඇතුළත් කරන්න (Format: `HH:mm` - Ex: `10:00`, `18:30`).");
     }
 
     // Destination Resolve
@@ -225,9 +230,7 @@ _Ex:_ \`${prefix}timemgs https://whatsapp.com/channel/xxx, 10:00\`
       dest = await resolveDestination(sock, rawTarget);
       if (!dest || !dest.jid) throw new Error("Invalid destination");
     } catch (err) {
-      return await sock.sendMessage(from, {
-        text: `⚠️ Target එක හඳුනාගත නොහැකි විය: ${err.message}`
-      }, { quoted: msg });
+      return await reply(`⚠️ Target එක හඳුනාගත නොහැකි විය: ${err.message}`);
     }
 
     let mediaBase64 = null;
@@ -263,7 +266,7 @@ _Ex:_ \`${prefix}timemgs https://whatsapp.com/channel/xxx, 10:00\`
     }
 
     // Save to Database
-    const savedRecord = await ScheduleModel.create({
+    await ScheduleModel.create({
       targetJid: dest.jid,
       targetName: dest.name,
       targetType: dest.type,
@@ -276,8 +279,7 @@ _Ex:_ \`${prefix}timemgs https://whatsapp.com/channel/xxx, 10:00\`
 
     react("✅").catch(() => {});
 
-    return await sock.sendMessage(from, {
-      text: 
+    return await reply(
 `╔══════════════════════╗
    ⏱️ 𝐒 𝐂 𝐇 𝐄 𝐃 𝐔 𝐋 𝐄 𝐃 ⏱️
 ╚══════════════════════╝
@@ -290,6 +292,6 @@ _Ex:_ \`${prefix}timemgs https://whatsapp.com/channel/xxx, 10:00\`
 ├─▸ 💾 *Storage*: MongoDB Cloud (Persistent)
 └───────────────────────
 _Server restart හෝ update වුවද නියමිත වේලාවට පණිවිඩය නිකුත් වේ._`
-    }, { quoted: msg });
+    );
   }
 };
