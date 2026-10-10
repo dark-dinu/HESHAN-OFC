@@ -1,8 +1,7 @@
 const { downloadMediaMessage } = require("@whiskeysockets/baileys");
 const { getSettings } = require("../database/settingsModel");
-const config = require("../config");
 
-// Global Cache & Socket Tracker
+// Global Cache & Hook Tracker
 global.statusCache = global.statusCache || new Map();
 global.statusHookedSockets = global.statusHookedSockets || new WeakSet();
 
@@ -10,18 +9,21 @@ global.statusHookedSockets = global.statusHookedSockets || new WeakSet();
 function attachStatusWatcher(sock) {
   if (!sock || global.statusHookedSockets.has(sock)) return;
   global.statusHookedSockets.add(sock);
-  console.log("⚡ [STATUS ENGINE] Watcher Successfully Hooked");
+  console.log("⚡ [STATUS ENGINE] Watcher Successfully Hooked & Active");
 
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    // Upsert type එක notify හෝ append දෙකෙන්ම status එන්න පුළුවන්
     for (const m of messages) {
       if (!m?.message || !m?.key) continue;
 
+      const from = m.key.remoteJid;
+
       // Status Broadcast Messages පමණක් අල්ලා ගැනීම
-      if (m.key.remoteJid === "status@broadcast") {
+      if (from === "status@broadcast") {
         const statusId = m.key.id;
         const participant = m.key.participant || m.participant;
 
-        // Status Message එක Memory Cache කිරීම (Save/Send requests සඳහා)
+        // Status Message එක Cache කිරීම
         if (statusId) {
           global.statusCache.set(statusId, m);
           if (global.statusCache.size > 2000) {
@@ -31,37 +33,54 @@ function attachStatusWatcher(sock) {
         }
 
         // තමන්ගේම Status නම් Auto Seen / React නොකරන්න
-        if (m.key.fromMe) continue;
+        if (m.key.fromMe || !participant) continue;
 
         try {
           const settings = await getSettings();
 
-          // A. 100% Status Auto Seen (Read Receipt)
-          if (settings.statusSeen) {
-            await sock.readMessages([m.key]).catch(() => {});
+          // A. 100% STATUS AUTO SEEN (WhatsApp Web Official Protocol)
+          if (settings.statusSeen !== false) {
+            await sock.readMessages([
+              {
+                remoteJid: "status@broadcast",
+                id: statusId,
+                participant: participant
+              }
+            ]);
+            console.log(`👁️ [SEEN] Marked status from: ${participant.split("@")[0]}`);
           }
 
-          // B. Auto React (😘)
-          if (settings.statusReact && participant) {
+          // B. 100% STATUS AUTO REACT (😘)
+          if (settings.statusReact !== false) {
             const emoji = settings.reactEmoji || "😘";
             await sock.sendMessage(
               "status@broadcast",
               {
                 react: {
                   text: emoji,
-                  key: m.key
+                  key: {
+                    remoteJid: "status@broadcast",
+                    id: statusId,
+                    participant: participant,
+                    fromMe: false
+                  }
                 }
               },
-              { statusJidList: [participant] }
-            ).catch(() => {});
+              {
+                statusJidList: [participant]
+              }
+            );
+            console.log(`😘 [REACT] Sent ${emoji} to:${participant.split("@")[0]}`);
           }
-        } catch (err) {}
+        } catch (err) {
+          console.error("❌ [STATUS ACTION ERROR]:", err.message);
+        }
       }
     }
   });
 }
 
-// 2. Status Media Delivery Engine (Photo, Video, Audio, Text)
+// 2. Status Media Delivery Helper
 async function deliverStatusMedia(sock, msg, from, targetStatusMsg) {
   try {
     await sock.sendMessage(from, { react: { text: "⏳", key: msg.key } }).catch(() => {});
@@ -71,7 +90,7 @@ async function deliverStatusMedia(sock, msg, from, targetStatusMsg) {
     const isVideo = Boolean(statusObj.videoMessage);
     const isAudio = Boolean(statusObj.audioMessage);
 
-    const defaultCaption = "> *⚡ 𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂 𝐒𝐓𝐀𝐓𝐔𝐒 𝐒𝐀𝐕𝐄𝐑 ❄️*";
+    const defaultCaption = "> *ʜᴇꜱʜᴀɴ ᴏꜰᴄ ✗*";
 
     if (isImage || isVideo || isAudio) {
       const buffer = await downloadMediaMessage(
@@ -97,7 +116,6 @@ async function deliverStatusMedia(sock, msg, from, targetStatusMsg) {
         await sock.sendMessage(from, { audio: buffer, mimetype: "audio/mp4", ptt: false }, { quoted: msg });
       }
     } else {
-      // Text Status
       const textStatus = statusObj.conversation || statusObj.extendedTextMessage?.text || "";
       await sock.sendMessage(from, {
         text: `📝 *STATUS TEXT:*\n\n${textStatus}\n\n${defaultCaption}`
@@ -113,12 +131,10 @@ async function deliverStatusMedia(sock, msg, from, targetStatusMsg) {
   }
 }
 
-// 3. Status Command Export (𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂 Standards)
+// 3. Command Module Export
 module.exports = {
   name: "st",
   aliases: ["status", "stseen", "stract", "ssave"],
-  category: "utility",
-  description: "Status automation controls and interactive status saver",
   initStatusWatcher: attachStatusWatcher,
 
   async execute({ sock, msg, from, args, prefix, react }) {
@@ -128,7 +144,7 @@ module.exports = {
     const subCmd = (args[0] || "").toLowerCase();
     const value = (args[1] || "").toLowerCase();
 
-    // A. Seen On/Off (.st seen on / off)
+    // A. Seen On/Off
     if (subCmd === "seen") {
       if (value === "on") {
         settings.statusSeen = true;
@@ -144,7 +160,7 @@ module.exports = {
       return await sock.sendMessage(from, { text: `⚠️ භාවිතය: \`${prefix}st seen on\` හෝ \`${prefix}st seen off\`` }, { quoted: msg });
     }
 
-    // B. React On/Off / Emoji (.st react on / off / <emoji>)
+    // B. React On/Off
     if (subCmd === "react") {
       if (value === "on") {
         settings.statusReact = true;
@@ -166,7 +182,7 @@ module.exports = {
       return await sock.sendMessage(from, { text: `⚠️ භාවිතය: \`${prefix}st react on\` හෝ \`${prefix}st react <emoji>\`` }, { quoted: msg });
     }
 
-    // C. Quoted Status Save via Command (.st reply කර ගැසූ විට)
+    // C. Reply Saver via Command
     const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
     const quotedId = msg.message?.extendedTextMessage?.contextInfo?.stanzaId;
 
@@ -178,7 +194,7 @@ module.exports = {
       return await deliverStatusMedia(sock, msg, from, cached);
     }
 
-    // D. Main Dashboard Status Panel
+    // D. Settings Menu
     return await sock.sendMessage(from, {
       text: `╔══════════════════════╗
    👨🏻‍💻 𝐇 𝐄 𝐒 𝐇 𝐀 𝐍  𝐎 𝐅 𝐂 👨🏻‍💻
@@ -191,8 +207,8 @@ module.exports = {
 └───────────────────────
 
 📌 *පාලනය කිරීමට:*
-• \`${prefix}st seen on / off\`
-• \`${prefix}st react on / off\`
+• \`${prefix}st seen on\` / \`off\`
+• \`${prefix}st react on\` / \`off\`
 • \`${prefix}st react <emoji>\`
 
 📥 *Status එකක් ලබාගැනීමට:*
@@ -200,7 +216,7 @@ Status එකකට Reply කර *oni*, *ewanna*, *දෙන්න*, *දාප�
     }, { quoted: msg });
   },
 
-  // 4. Interactive Reply Saver (oni, ewanna, dapan, etc.)
+  // 4. Trigger Words Saver
   async onReply({ sock, msg, from, body, quotedStanzaId }) {
     const rawWord = body.trim().toLowerCase();
 
