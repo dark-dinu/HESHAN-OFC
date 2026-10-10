@@ -22,33 +22,11 @@ const commands = new Map();
 const aliases = new Map();
 let sock = null;
 
-// ==========================================
-// 1. Status Settings Database Model
-// ==========================================
-const StatusSchema = new mongoose.Schema({
-  id: { type: String, default: "status_config", unique: true },
-  autoRead: { type: Boolean, default: false },
-  autoReact: { type: Boolean, default: false },
-  emoji: { type: String, default: "🥰" }
-});
-
-const StatusModel = mongoose.models.StatusSettings || mongoose.model("StatusSettings", StatusSchema);
-
-async function getStatusConfig() {
-  try {
-    let conf = await StatusModel.findOne({ id: "status_config" });
-    if (!conf) conf = await StatusModel.create({ id: "status_config" });
-    return conf;
-  } catch (e) {
-    return { autoRead: false, autoReact: false, emoji: "🥰" };
-  }
-}
-
 // Global Memory Cache for Status Saver
-global.statusCache = new Map();
+global.statusCache = global.statusCache || new Map();
 
 // ==========================================
-// 2. Plugins Auto-Loader (C++ Modular Structure)
+// 1. Plugins Auto-Loader (C++ Modular Structure)
 // ==========================================
 function loadPlugins() {
   commands.clear();
@@ -76,7 +54,7 @@ function loadPlugins() {
 }
 
 // ==========================================
-// 3. Web UI Pairing Dashboard
+// 2. Web UI Pairing Dashboard
 // ==========================================
 app.get("/", (req, res) => {
   res.send(`
@@ -163,10 +141,18 @@ app.get("/get-code", async (req, res) => {
 });
 
 // ==========================================
-// 4. Main Event Engine
+// 3. Main Event Engine
 // ==========================================
 function initEvents(waSock, saveCreds) {
   waSock.ev.on("creds.update", saveCreds);
+
+  // Hook Status Watcher
+  try {
+    const statusPlugin = require("./plugins/status");
+    if (statusPlugin && statusPlugin.initStatusWatcher) {
+      statusPlugin.initStatusWatcher(waSock);
+    }
+  } catch (e) {}
 
   waSock.ev.on("connection.update", (update) => {
     const { connection, lastDisconnect } = update;
@@ -177,6 +163,12 @@ function initEvents(waSock, saveCreds) {
       }
     } else if (connection === "open") {
       console.log(`⚡ ${config.BOT_NAME} Connected & Operational 🟢`);
+      try {
+        const statusPlugin = require("./plugins/status");
+        if (statusPlugin && statusPlugin.initStatusWatcher) {
+          statusPlugin.initStatusWatcher(waSock);
+        }
+      } catch (e) {}
     }
   });
 
@@ -187,46 +179,8 @@ function initEvents(waSock, saveCreds) {
 
     const from = msg.key.remoteJid;
 
-    // --- A. Status Updates (Auto Seen & React) ---
-    if (from === "status@broadcast") {
-      const statusId = msg.key.id;
-      if (statusId) {
-        global.statusCache.set(statusId, msg);
-        setTimeout(() => global.statusCache.delete(statusId), 12 * 60 * 60 * 1000);
-      }
-
-      if (msg.key.fromMe) return;
-
-      try {
-        const conf = await getStatusConfig();
-        
-        // Auto Read Status
-        if (conf.autoRead) {
-          await waSock.readMessages([msg.key]);
-        }
-
-        // Auto React Status
-        if (conf.autoReact && conf.emoji && statusId) {
-          const participant = msg.key.participant;
-          if (participant) {
-            await waSock.sendMessage(
-              "status@broadcast",
-              { react: { text: conf.emoji, key: msg.key } },
-              { statusJidList: [participant] }
-            );
-          }
-        }
-      } catch (err) {}
-      return;
-    }
-
-    // --- B. Message & Command Execution ---
-    const rawSender = msg.key.fromMe 
-      ? config.OWNER_NUMBER 
-      : (msg.key.participant || from || "");
-    const sender = rawSender.split("@")[0].replace(/[^0-9]/g, "");
-    const ownerClean = config.OWNER_NUMBER.replace(/[^0-9]/g, "");
-    const isOwner = msg.key.fromMe || sender === ownerClean;
+    // Status broadcast messages are handled by status.js background watcher
+    if (from === "status@broadcast") return;
 
     const mType = Object.keys(msg.message)[0];
     const body = (
@@ -236,23 +190,35 @@ function initEvents(waSock, saveCreds) {
       ""
     ).trim();
 
-    // Check Trigger without prefix (For Status Saver: oni, ewanna)
-    const lowerBody = body.toLowerCase();
-    const saveTriggers = ["oni", "ona", "ewanna", "evanna", "denna", "send", "save", "dapan", "ewapan"];
-    const isSaverTrigger = saveTriggers.some(t => lowerBody === t || lowerBody.startsWith(t + " "));
-
-    if (isSaverTrigger) {
-      const statusCmd = commands.get("status_saver");
-      if (statusCmd) {
-        try {
-          await statusCmd.execute({ sock: waSock, msg, isOwner, from });
-          return;
-        } catch (e) {}
-      }
+    // 1. Status Saver Interceptor (oni, ewanna, dapan, etc.)
+    const quotedStanzaId = msg.message.extendedTextMessage?.contextInfo?.stanzaId;
+    if (quotedStanzaId) {
+      try {
+        const statusPlugin = require("./plugins/status");
+        if (statusPlugin && statusPlugin.onReply) {
+          const handled = await statusPlugin.onReply({
+            sock: waSock,
+            msg,
+            from,
+            body,
+            quotedStanzaId
+          });
+          if (handled) return;
+        }
+      } catch (e) {}
     }
 
-    // Command Filter (Owner Only + Prefix: ,)
+    // 2. Command Authentication (Owner Only)
+    const rawSender = msg.key.fromMe 
+      ? config.OWNER_NUMBER 
+      : (msg.key.participant || from || "");
+    const sender = rawSender.split("@")[0].replace(/[^0-9]/g, "");
+    const ownerClean = config.OWNER_NUMBER.replace(/[^0-9]/g, "");
+    const isOwner = msg.key.fromMe || sender === ownerClean;
+
     if (!isOwner) return;
+
+    // 3. Command Execution
     const prefix = config.PREFIX || ",";
     if (!body.startsWith(prefix)) return;
 
@@ -266,14 +232,15 @@ function initEvents(waSock, saveCreds) {
         msg,
         args,
         text: args.join(" "),
+        body,
         from,
         sender,
         prefix,
+        config,
         reply: (text) => waSock.sendMessage(from, { text }, { quoted: msg }),
         react: (emoji) => waSock.sendMessage(from, { react: { text: emoji, key: msg.key } }),
         downloadMedia: () => downloadMediaMessage(msg, "buffer", {}),
-        quoted: msg.message.extendedTextMessage?.contextInfo?.quotedMessage || null,
-        statusModel: StatusModel
+        quoted: msg.message.extendedTextMessage?.contextInfo?.quotedMessage || null
       };
 
       try {
@@ -286,7 +253,7 @@ function initEvents(waSock, saveCreds) {
 }
 
 // ==========================================
-// 5. Bot Startup
+// 4. Bot Startup
 // ==========================================
 async function startBot() {
   try {
