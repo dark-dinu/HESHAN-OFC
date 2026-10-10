@@ -233,6 +233,9 @@ function initEvents(waSock, saveCreds) {
     const command = commands.get(cmdName) || aliases.get(cmdName);
 
     if (command) {
+      // Self-chat (Message yourself) ද යන්න හඳුනා ගැනීම
+      const isSelfChat = from.split("@")[0].replace(/[^0-9]/g, "") === ownerClean;
+
       const context = {
         sock: waSock,
         msg,
@@ -243,7 +246,8 @@ function initEvents(waSock, saveCreds) {
         sender,
         prefix,
         config,
-        reply: (text) => waSock.sendMessage(from, { text }, { quoted: msg }),
+        // Self chat එකේදී "Waiting for this message" නොවෙන්න direct text යැවීම
+        reply: (text) => waSock.sendMessage(from, { text }, isSelfChat ? {} : { quoted: msg }),
         react: (emoji) => waSock.sendMessage(from, { react: { text: emoji, key: msg.key } }),
         downloadMedia: () => downloadMediaMessage(msg, "buffer", {}),
         quoted: msg.message.extendedTextMessage?.contextInfo?.quotedMessage || null
@@ -273,8 +277,7 @@ async function startBot() {
         },
         printQRInTerminal: false,
         logger: pino({ level: "silent" }),
-        browser: Browsers.macOS("Chrome"),
-        syncFullHistory: false
+        browser: Browsers.macOS("Chrome")
       });
       initEvents(sock, saveCreds);
     }
