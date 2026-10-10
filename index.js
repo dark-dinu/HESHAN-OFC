@@ -58,7 +58,7 @@ function loadPlugins() {
 }
 
 // ==========================================
-// 2. Web UI Pairing Dashboard (With Reset Tool)
+// 2. Web UI Pairing Dashboard
 // ==========================================
 app.get("/", (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -103,9 +103,16 @@ app.get("/", (req, res) => {
           try {
             const res = await fetch('/get-code?num=' + num);
             const data = await res.json();
-            display.innerText = data.code || data.error || 'Failed';
-          } catch(e) { display.innerText = 'Server Error'; }
-          finally { btn.disabled = false; }
+            if(data.code) {
+              display.innerText = data.code;
+            } else {
+              display.innerText = data.error || 'Failed';
+            }
+          } catch(e) { 
+            display.innerText = 'Server Error'; 
+          } finally { 
+            btn.disabled = false; 
+          }
         }
 
         async function resetSession() {
@@ -117,7 +124,9 @@ app.get("/", (req, res) => {
             const data = await res.json();
             display.innerText = data.message || 'Reset Completed!';
             alert('Session cleared! දැන් නැවත Phone Number එක දී Pair WhatsApp ඔබන්න.');
-          } catch(e) { display.innerText = 'Reset Failed'; }
+          } catch(e) { 
+            display.innerText = 'Reset Failed'; 
+          }
         }
       </script>
     </body>
@@ -125,7 +134,7 @@ app.get("/", (req, res) => {
   `);
 });
 
-// Reset Session Endpoint
+// Reset Session (Clears MongoDB session collection clean)
 app.get("/reset-session", async (req, res) => {
   try {
     await connectMongo();
@@ -138,47 +147,59 @@ app.get("/reset-session", async (req, res) => {
     console.log("🧹 [SESSION PURGE] MongoDB Session Cleared Successfully!");
     return res.json({ success: true, message: "Cleared! Ready for new code" });
   } catch (err) {
+    console.error("Reset error:", err.message);
     return res.status(500).json({ error: err.message });
   }
 });
 
-// Direct Get-Code Endpoint
+// Single-Thread Safe Pairing Endpoint
 app.get("/get-code", async (req, res) => {
   const { num } = req.query;
   if (!num) return res.status(400).json({ error: "Missing number" });
 
   try {
-    const { state, saveCreds } = await useMongoAuthState();
-    if (sock) { 
-      try { sock.end(); } catch (e) {} 
+    const cleanNum = num.replace(/[^0-9]/g, "");
+    
+    // කලින් ක්‍රියාත්මක socket එකක් ඇත්නම් clean up කිරීම
+    if (sock) {
+      try { sock.end(); } catch (e) {}
       sock = null;
+      await delay(1000);
     }
 
-    sock = makeWASocket({
+    const { state, saveCreds } = await useMongoAuthState();
+
+    const pairSock = makeWASocket({
       auth: {
         creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }))
+        keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" }))
       },
       printQRInTerminal: false,
-      logger: pino({ level: "fatal" }),
+      logger: pino({ level: "silent" }),
       browser: Browsers.macOS("Chrome"),
-      defaultQueryTimeoutMs: 60000
+      defaultQueryTimeoutMs: 60000,
+      connectTimeoutMs: 60000
     });
 
-    sock.ev.on("creds.update", saveCreds);
+    pairSock.ev.on("creds.update", saveCreds);
 
-    if (!sock.authState.creds.registered) {
-      await delay(2500);
-      const code = await sock.requestPairingCode(num);
+    if (!pairSock.authState.creds.registered) {
+      await delay(3000); // Socket එක WhatsApp Gateway එකට handshake වීමට delay එක
+      const code = await pairSock.requestPairingCode(cleanNum);
       const formattedCode = code?.match(/.{1,4}/g)?.join("-") || code;
+
+      sock = pairSock;
       initEvents(sock, saveCreds);
+
       return res.json({ code: formattedCode });
     } else {
+      sock = pairSock;
       initEvents(sock, saveCreds);
       return res.json({ code: "Already Linked & Online" });
     }
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    console.error("Pairing Error Log:", err);
+    return res.status(500).json({ error: err.message || "Server Error" });
   }
 });
 
@@ -351,10 +372,10 @@ async function startBot() {
       sock = makeWASocket({
         auth: {
           creds: state.creds,
-          keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }))
+          keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" }))
         },
         printQRInTerminal: false,
-        logger: pino({ level: "fatal" }),
+        logger: pino({ level: "silent" }),
         browser: Browsers.macOS("Chrome"),
         defaultQueryTimeoutMs: 60000,
         markOnlineOnConnect: true,
