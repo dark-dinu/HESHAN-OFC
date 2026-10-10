@@ -2,63 +2,72 @@ const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const pino = require("pino");
-const mongoose = require("mongoose");
 const { 
   makeWASocket, 
   DisconnectReason, 
   makeCacheableSignalKeyStore, 
   Browsers, 
   delay, 
-  downloadMediaMessage,
-  generateWAMessageFromContent,
-  proto
+  downloadMediaMessage 
 } = require("@whiskeysockets/baileys");
-const { useMongoAuthState, connectMongo } = require("./database/mongoSession");
-const config = require("./config");
+const { useMongoAuthState, connectMongo } = require("./auth");
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+const CONFIG = {
+  BOT_NAME: "𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂",
+  PREFIX: ",",
+  OWNER_NUMBER: "94719845166", // ඔයාගේ අංකය
+  PORT: process.env.PORT || 3000
+};
+
 const commands = new Map();
 const aliases = new Map();
 let sock = null;
 let isStarting = false;
-let daemonsInitialized = false;
-
-// Global Memory Cache for Status Saver
-global.statusCache = global.statusCache || new Map();
 
 // ==========================================
-// 1. Plugins Auto-Loader (Fast In-Memory Map)
+// 1. Hot Plugin Auto-Loader (Zero Restart Needed)
 // ==========================================
 function loadPlugins() {
   commands.clear();
   aliases.clear();
   const pluginsPath = path.join(__dirname, "plugins");
   
-  if (fs.existsSync(pluginsPath)) {
-    const files = fs.readdirSync(pluginsPath).filter((f) => f.endsWith(".js"));
-    for (const file of files) {
-      try {
-        delete require.cache[require.resolve(path.join(pluginsPath, file))];
-        const cmd = require(path.join(pluginsPath, file));
-        if (cmd.name && cmd.execute) {
-          commands.set(cmd.name.toLowerCase(), cmd);
-          if (Array.isArray(cmd.aliases)) {
-            cmd.aliases.forEach(alias => aliases.set(alias.toLowerCase(), cmd));
-          }
-        }
-      } catch (err) {
-        console.error(`[Plugin Error] ${file}:`, err.message);
-      }
-    }
-    console.log(`⚡ Loaded ${commands.size} plugins cleanly.`);
+  if (!fs.existsSync(pluginsPath)) {
+    fs.mkdirSync(pluginsPath, { recursive: true });
   }
+
+  const files = fs.readdirSync(pluginsPath).filter((f) => f.endsWith(".js"));
+  for (const file of files) {
+    try {
+      const fullPath = path.join(pluginsPath, file);
+      delete require.cache[require.resolve(fullPath)];
+      const cmd = require(fullPath);
+      if (cmd.name && cmd.execute) {
+        commands.set(cmd.name.toLowerCase(), cmd);
+        if (Array.isArray(cmd.aliases)) {
+          cmd.aliases.forEach(alias => aliases.set(alias.toLowerCase(), cmd));
+        }
+      }
+    } catch (err) {
+      console.error(`[Plugin Load Error] ${file}:`, err.message);
+    }
+  }
+  console.log(`⚡ [CORE] Loaded ${commands.size} commands successfully.`);
 }
 
+// Background auto-loader for new plugins (Folder එකට file එකක් දැම්ම ගමන් index එකට අත නොතියා auto-load වේ)
+fs.watch(path.join(__dirname, "plugins"), (eventType, filename) => {
+  if (filename && filename.endsWith(".js")) {
+    loadPlugins();
+  }
+});
+
 // ==========================================
-// 2. Web UI Pairing Dashboard
+// 2. High-Speed Pairing Web UI
 // ==========================================
 app.get("/", (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -68,7 +77,7 @@ app.get("/", (req, res) => {
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂</title>
+      <title>${CONFIG.BOT_NAME}</title>
       <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; background: #080c10; color: #fff; margin: 0; padding: 20px; box-sizing: border-box; }
         .box { background: #0f1622; padding: 2.5rem 2rem; border-radius: 20px; width: 100%; max-width: 340px; text-align: center; border: 1px solid #1f293d; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
@@ -85,8 +94,8 @@ app.get("/", (req, res) => {
     </head>
     <body>
       <div class="box">
-        <h1>𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂</h1>
-        <p>Direct Link Portal</p>
+        <h1>${CONFIG.BOT_NAME}</h1>
+        <p>Ultra Fast Link Portal</p>
         <input type="text" id="phone" placeholder="947xxxxxxxx" required />
         <button id="btn" onclick="fetchCode()">Pair WhatsApp</button>
         <button class="reset-btn" id="resetBtn" onclick="resetSession()">Reset / Force New Pair</button>
@@ -103,16 +112,9 @@ app.get("/", (req, res) => {
           try {
             const res = await fetch('/get-code?num=' + num);
             const data = await res.json();
-            if(data.code) {
-              display.innerText = data.code;
-            } else {
-              display.innerText = data.error || 'Failed';
-            }
-          } catch(e) { 
-            display.innerText = 'Server Error'; 
-          } finally { 
-            btn.disabled = false; 
-          }
+            display.innerText = data.code || data.error || 'Failed';
+          } catch(e) { display.innerText = 'Server Error'; }
+          finally { btn.disabled = false; }
         }
 
         async function resetSession() {
@@ -123,10 +125,8 @@ app.get("/", (req, res) => {
             const res = await fetch('/reset-session');
             const data = await res.json();
             display.innerText = data.message || 'Reset Completed!';
-            alert('Session cleared! දැන් නැවත Phone Number එක දී Pair WhatsApp ඔබන්න.');
-          } catch(e) { 
-            display.innerText = 'Reset Failed'; 
-          }
+            alert('Session Cleared! දැන් අංකය දී Pair WhatsApp ඔබන්න.');
+          } catch(e) { display.innerText = 'Reset Failed'; }
         }
       </script>
     </body>
@@ -134,33 +134,27 @@ app.get("/", (req, res) => {
   `);
 });
 
-// Reset Session (Clears MongoDB session collection clean)
 app.get("/reset-session", async (req, res) => {
   try {
-    await connectMongo();
-    const AuthModel = mongoose.models.SessionAuth || mongoose.model("SessionAuth");
-    await AuthModel.deleteMany({});
+    const { clearSession } = await useMongoAuthState();
+    await clearSession();
     if (sock) {
       try { sock.end(); } catch (e) {}
       sock = null;
     }
-    console.log("🧹 [SESSION PURGE] MongoDB Session Cleared Successfully!");
+    console.log("🧹 [PURGE] Session Cleared Successfully");
     return res.json({ success: true, message: "Cleared! Ready for new code" });
   } catch (err) {
-    console.error("Reset error:", err.message);
     return res.status(500).json({ error: err.message });
   }
 });
 
-// Single-Thread Safe Pairing Endpoint
 app.get("/get-code", async (req, res) => {
   const { num } = req.query;
   if (!num) return res.status(400).json({ error: "Missing number" });
 
   try {
     const cleanNum = num.replace(/[^0-9]/g, "");
-    
-    // කලින් ක්‍රියාත්මක socket එකක් ඇත්නම් clean up කිරීම
     if (sock) {
       try { sock.end(); } catch (e) {}
       sock = null;
@@ -184,7 +178,7 @@ app.get("/get-code", async (req, res) => {
     pairSock.ev.on("creds.update", saveCreds);
 
     if (!pairSock.authState.creds.registered) {
-      await delay(3000); // Socket එක WhatsApp Gateway එකට handshake වීමට delay එක
+      await delay(3000);
       const code = await pairSock.requestPairingCode(cleanNum);
       const formattedCode = code?.match(/.{1,4}/g)?.join("-") || code;
 
@@ -198,45 +192,28 @@ app.get("/get-code", async (req, res) => {
       return res.json({ code: "Already Linked & Online" });
     }
   } catch (err) {
-    console.error("Pairing Error Log:", err);
-    return res.status(500).json({ error: err.message || "Server Error" });
+    console.error("Pairing Error:", err.message);
+    return res.status(500).json({ error: err.message });
   }
 });
 
 app.get("/health", (req, res) => res.status(200).send("OK"));
 
 // ==========================================
-// 3. Main Event Engine & Message Router
+// 3. Core Event Engine & Command Dispatcher
 // ==========================================
 function initEvents(waSock, saveCreds) {
   waSock.ev.on("creds.update", saveCreds);
 
-  const initDaemons = () => {
-    if (daemonsInitialized) return;
-    daemonsInitialized = true;
-
-    try {
-      const statusPlugin = require("./plugins/status");
-      if (statusPlugin?.initStatusWatcher) statusPlugin.initStatusWatcher(waSock);
-    } catch (e) {}
-
-    try {
-      const timemgsPlugin = require("./plugins/timemgs");
-      if (timemgsPlugin?.startScheduleDaemon) timemgsPlugin.startScheduleDaemon(waSock);
-    } catch (e) {}
-  };
-
   waSock.ev.on("connection.update", (update) => {
     const { connection, lastDisconnect } = update;
     if (connection === "close") {
-      daemonsInitialized = false;
       const reason = lastDisconnect?.error?.output?.statusCode;
       if (reason !== DisconnectReason.loggedOut) {
         setTimeout(startBot, 3000);
       }
     } else if (connection === "open") {
-      console.log(`⚡ ${config.BOT_NAME} Connected & Fully Operational 🟢`);
-      initDaemons();
+      console.log(`⚡ [CONNECTED] ${CONFIG.BOT_NAME} Online & Ready 🟢`);
     }
   });
 
@@ -256,37 +233,17 @@ function initEvents(waSock, saveCreds) {
       ""
     ).trim();
 
-    // 1. Direct Status Saver Interceptor
-    const quotedStanzaId = msg.message.extendedTextMessage?.contextInfo?.stanzaId;
-    if (quotedStanzaId) {
-      try {
-        const statusPlugin = require("./plugins/status");
-        if (statusPlugin?.onReply) {
-          const handled = await statusPlugin.onReply({
-            sock: waSock,
-            msg,
-            from,
-            body,
-            quotedStanzaId
-          });
-          if (handled) return;
-        }
-      } catch (e) {}
-    }
-
-    // 2. Strict Owner Verification
-    const myCleanNumber = (waSock.user?.id || config.OWNER_NUMBER).split(":")[0].replace(/[^0-9]/g, "");
-    const rawSender = msg.key.fromMe 
-      ? myCleanNumber 
-      : (msg.key.participant || from || "");
+    // Owner Verification
+    const myCleanNumber = (waSock.user?.id || CONFIG.OWNER_NUMBER).split(":")[0].replace(/[^0-9]/g, "");
+    const rawSender = msg.key.fromMe ? myCleanNumber : (msg.key.participant || from || "");
     const sender = rawSender.split("@")[0].split(":")[0].replace(/[^0-9]/g, "");
-    const ownerClean = config.OWNER_NUMBER.replace(/[^0-9]/g, "");
+    const ownerClean = CONFIG.OWNER_NUMBER.replace(/[^0-9]/g, "");
     const isOwner = msg.key.fromMe || sender === ownerClean || sender === myCleanNumber;
 
     if (!isOwner) return;
 
-    // 3. Command Execution Routing
-    const prefix = config.PREFIX || ",";
+    // Command Check
+    const prefix = CONFIG.PREFIX;
     if (!body.startsWith(prefix)) return;
 
     const [cmdTrigger, ...args] = body.slice(prefix.length).trim().split(/\s+/);
@@ -297,29 +254,20 @@ function initEvents(waSock, saveCreds) {
       const targetPhone = from.split("@")[0].split(":")[0].replace(/[^0-9]/g, "");
       const isSelfChat = from.includes("@s.whatsapp.net") && (targetPhone === ownerClean || targetPhone === myCleanNumber);
 
-      // Safe Message Dispatcher (Bypasses Signal Ratchet Mismatch)
+      // 100% Anti "Waiting for this message" Dispatcher
       const reply = async (text) => {
         try {
           if (isSelfChat) {
-            const waMsg = generateWAMessageFromContent(
-              from,
-              proto.Message.fromObject({
-                conversation: String(text)
-              }),
-              { userJid: waSock.user.id }
-            );
-            return await waSock.relayMessage(from, waMsg.message, {
-              messageId: waMsg.key.id
-            });
+            // Direct text without quoted headers to prevent Signal Ratchet drops
+            return await waSock.sendMessage(from, { text: String(text) });
           } else {
             return await waSock.sendMessage(from, { text: String(text) }, { quoted: msg });
           }
         } catch (e) {
-          return await waSock.sendMessage(from, { text: String(text) }).catch(() => {});
+          console.error("Reply Error:", e.message);
         }
       };
 
-      // Voice Note Sender Helper (PTT Blue Mic Waveform)
       const sendVoice = async (audioBuffer) => {
         return await waSock.sendMessage(from, {
           audio: audioBuffer,
@@ -337,7 +285,6 @@ function initEvents(waSock, saveCreds) {
         from,
         sender,
         prefix,
-        config,
         reply,
         sendVoice,
         react: (emoji) => waSock.sendMessage(from, { react: { text: emoji, key: msg.key } }).catch(() => {}),
@@ -348,7 +295,7 @@ function initEvents(waSock, saveCreds) {
       try {
         await command.execute(context);
       } catch (err) {
-        console.error(`Command [${cmdName}] execution failed:`, err.message);
+        console.error(`Command [${cmdName}] Error:`, err.message);
       }
     }
   });
@@ -378,9 +325,7 @@ async function startBot() {
         logger: pino({ level: "silent" }),
         browser: Browsers.macOS("Chrome"),
         defaultQueryTimeoutMs: 60000,
-        markOnlineOnConnect: true,
-        emitOwnEvents: true,
-        generateHighQualityLinkPreview: true
+        markOnlineOnConnect: true
       });
 
       initEvents(sock, saveCreds);
@@ -392,8 +337,7 @@ async function startBot() {
   }
 }
 
-const PORT = process.env.PORT || config.PORT || 3000;
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🌐 Web UI active on port ${PORT}`);
+app.listen(CONFIG.PORT, "0.0.0.0", () => {
+  console.log(`🌐 [SERVER] Web Portal running on port ${CONFIG.PORT}`);
   startBot();
 });
