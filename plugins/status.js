@@ -1,15 +1,12 @@
 const { downloadMediaMessage } = require("@whiskeysockets/baileys");
 const { getSettings } = require("../database/settingsModel");
-const config = require("../config");
 
-// Triggers list
 const SAVE_TRIGGERS = [
   "ඔනි", "ඕනි", "එවන්න", "දෙන්න", "දීපන්", "දාපන්",
-  "oni", "ewanna", "danna", "dapan", "ewapan", "diyan", 
+  "oni", "ona", "ewanna", "evanna", "danna", "dapan", "ewapan", "diyan", 
   "save", "ewannako", "dannako", "send", "denna", "one"
 ];
 
-// Status Caching Map (පැය 24ක් memory එකේ තබා ගනී)
 if (!global.statusCache) {
   global.statusCache = new Map();
 }
@@ -19,6 +16,7 @@ let isWatcherInitialized = false;
 function initStatusWatcher(sock) {
   if (isWatcherInitialized || !sock) return;
   isWatcherInitialized = true;
+  console.log("Status Watcher Service Running...");
 
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
@@ -34,19 +32,17 @@ function initStatusWatcher(sock) {
       const statusId = msg.key.id;
       const participant = msg.key.participant;
 
-      // Status එක Cache එකට එකතු කිරීම
       if (statusId) {
         global.statusCache.set(statusId, msg);
         setTimeout(() => global.statusCache.delete(statusId), 24 * 60 * 60 * 1000);
       }
 
-      // තමන් දාපු status නම් bypass
       if (msg.key.fromMe) return;
 
       try {
         const settings = await getSettings();
 
-        // 1. Auto Seen
+        // Auto Seen
         if (settings.statusSeen) {
           await sock.readMessages([
             {
@@ -57,17 +53,12 @@ function initStatusWatcher(sock) {
           ]);
         }
 
-        // 2. Auto React (😘)
+        // Auto React (😘)
         if (settings.statusReact && statusId && participant) {
           const emoji = settings.reactEmoji || "😘";
           await sock.sendMessage(
             "status@broadcast",
-            {
-              react: {
-                text: emoji,
-                key: msg.key
-              }
-            },
+            { react: { text: emoji, key: msg.key } },
             { statusJidList: [participant] }
           );
         }
@@ -88,64 +79,73 @@ function initStatusWatcher(sock) {
 
     if (!text) return;
 
-    // Check Trigger
     const isTrigger = SAVE_TRIGGERS.some(trig => text === trig || text.startsWith(trig + " "));
     if (!isTrigger) return;
 
-    // Quoted context පරීක්ෂාව
     const contextInfo = msg.message.extendedTextMessage?.contextInfo;
-    const quotedId = contextInfo?.stanzaId;
+    if (!contextInfo) return;
 
-    if (quotedId && global.statusCache.has(quotedId)) {
-      const targetStatus = global.statusCache.get(quotedId);
-      const isMyStatus = targetStatus.key.fromMe;
-      const myJid = sock.user.id.split(":")[0] + "@s.whatsapp.net";
-      const senderJid = msg.key.remoteJid;
+    const quotedId = contextInfo.stanzaId;
+    const quotedParticipant = contextInfo.participant;
 
-      // මම ඉල්ලුවොත් මගේ Inbox එකට, වෙන කෙනෙක් මගෙන් ඉල්ලුවොත් එයාගේ Chat එකට
-      const destination = isMyStatus ? senderJid : myJid;
+    // Status එකකට reply කර ඇත්නම් පමණක් (remoteJid status@broadcast විය යුතුයි)
+    const isStatusReply = contextInfo.remoteJid === "status@broadcast" || quotedParticipant?.includes("@s.whatsapp.net");
+    if (!isStatusReply) return;
 
-      try {
-        const sMsg = targetStatus.message;
-        const sType = Object.keys(sMsg)[0];
+    // Cache එකෙන් ගන්නවා, නැත්නම් QuotedMessage එකෙන් කෙලින්ම ගන්නවා
+    let targetStatus = global.statusCache.get(quotedId);
+    let targetMsgObj = targetStatus || {
+      key: {
+        remoteJid: "status@broadcast",
+        id: quotedId,
+        participant: quotedParticipant
+      },
+      message: contextInfo.quotedMessage
+    };
 
-        // 1. Photo Status
-        if (sType === "imageMessage") {
-          const buffer = await downloadMediaMessage(targetStatus, "buffer", {});
-          await sock.sendMessage(
-            destination, 
-            { image: buffer, caption: sMsg.imageMessage.caption || "" },
-            isMyStatus ? { quoted: msg } : {}
-          );
-        }
-        // 2. Video Status
-        else if (sType === "videoMessage") {
-          const buffer = await downloadMediaMessage(targetStatus, "buffer", {});
-          await sock.sendMessage(
-            destination, 
-            { video: buffer, caption: sMsg.videoMessage.caption || "" },
-            isMyStatus ? { quoted: msg } : {}
-          );
-        }
-        // 3. Text Status
-        else if (sType === "extendedTextMessage" || sType === "conversation") {
-          const caption = sMsg.extendedTextMessage?.text || sMsg.conversation || "";
-          await sock.sendMessage(
-            destination, 
-            { text: caption },
-            isMyStatus ? { quoted: msg } : {}
-          );
-        }
-      } catch (err) {
-        console.error("Status Forward Error:", err.message);
+    if (!targetMsgObj?.message) return;
+
+    const myJid = sock.user.id.split(":")[0] + "@s.whatsapp.net";
+    const isMyStatus = targetMsgObj.key?.fromMe || quotedParticipant?.split("@")[0] === sock.user.id.split(":")[0];
+    const destination = isMyStatus ? from : myJid;
+
+    try {
+      const sm = targetMsgObj.message;
+      const sType = Object.keys(sm)[0];
+
+      // 1. Photo Status
+      if (sType === "imageMessage") {
+        const buffer = await downloadMediaMessage(targetMsgObj, "buffer", {});
+        await sock.sendMessage(
+          destination, 
+          { image: buffer, caption: sm.imageMessage?.caption || "" },
+          isMyStatus ? { quoted: msg } : {}
+        );
       }
+      // 2. Video Status
+      else if (sType === "videoMessage") {
+        const buffer = await downloadMediaMessage(targetMsgObj, "buffer", {});
+        await sock.sendMessage(
+          destination, 
+          { video: buffer, caption: sm.videoMessage?.caption || "" },
+          isMyStatus ? { quoted: msg } : {}
+        );
+      }
+      // 3. Text Status
+      else if (sType === "extendedTextMessage" || sType === "conversation") {
+        const caption = sm.extendedTextMessage?.text || sm.conversation || "";
+        await sock.sendMessage(
+          destination, 
+          { text: caption },
+          isMyStatus ? { quoted: msg } : {}
+        );
+      }
+    } catch (err) {
+      console.error("Status download error:", err.message);
     }
   });
 }
 
-// ==========================================
-// C. COMMAND CONTROL (.st seen on/off)
-// ==========================================
 module.exports = {
   name: "st",
   aliases: ["status"],
@@ -158,7 +158,6 @@ module.exports = {
     const value = (args[1] || "").toLowerCase();
     const settings = await getSettings();
 
-    // 1. Seen On/Off
     if (subCmd === "seen") {
       if (value === "on") {
         settings.statusSeen = true;
@@ -168,12 +167,9 @@ module.exports = {
         settings.statusSeen = false;
         await settings.save();
         return reply("Status Auto Seen: *OFF 🔴* (Saved)");
-      } else {
-        return reply(`භාවිතය: *${prefix}st seen on* හෝ *${prefix}st seen off*`);
       }
     }
 
-    // 2. React On/Off
     if (subCmd === "react") {
       if (value === "on") {
         settings.statusReact = true;
@@ -188,12 +184,9 @@ module.exports = {
         settings.statusReact = true;
         await settings.save();
         return reply(`Status Auto React Emoji: *${args[1]}* (ON 🟢)`);
-      } else {
-        return reply(`භාවිතය: *${prefix}st react on* හෝ *${prefix}st react off*`);
       }
     }
 
-    // Status Overview Panel
     return reply(
 `*❬ 𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂 - STATUS CONFIG ❭* ⚙️
 
