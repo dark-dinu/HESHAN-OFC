@@ -1,24 +1,36 @@
+const fs = require("fs");
+const config = require("../config");
+
 module.exports = {
-  name: "speed",
-  aliases: ["ping", "ms"],
+  name: "ping",
+  aliases: ["speed", "ms"],
   description: "Real network latency speed test",
-  async execute({ msg, reply, react }) {
-    // 1. Reaction එක background එකේ run වෙන්න අරිනවා (Speed එක drop නොවෙන්න)
+  async execute({ sock, msg, from, reply, react }) {
     react("🚀").catch(() => {});
 
-    // 2. Message එක WhatsApp Server එකෙන් පිටත් වූ වෙලාව (Epoch ms)
     const sentTime = Number(msg.messageTimestamp) * 1000;
-    
-    // 3. Bot එකට Message එක ලැබුණු සැබෑ වෙලාව සහ sentTime අතර වෙනස
     const now = Date.now();
     let latency = now - sentTime;
 
-    // Server time drift හෝ 0 ට අඩු වීම් වැළැක්වීමට (Realistic 10ms - 200ms range)
     if (latency <= 0 || isNaN(latency)) {
       latency = Math.floor(Math.random() * 20) + 15;
     }
 
-    // 4. One-Shot Clean Reply
-    await reply(`*✗𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂 ❬${latency}𝘮𝘴❭ 📍*`);
+    const textPayload = `*✗ 𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂 ❬${latency}𝘮𝘴❭ 📍*`;
+
+    try {
+      // 1. Logo image එකක් එක්ක caption විදියට යැවීම (Waiting for message ලෙඩේ එන්නේ නෑ)
+      if (config.LOGO && fs.existsSync(config.LOGO)) {
+        return await sock.sendMessage(from, {
+          image: fs.readFileSync(config.LOGO),
+          caption: textPayload
+        });
+      }
+
+      // 2. Logo නැත්නම් direct plain text
+      await sock.sendMessage(from, { text: textPayload });
+    } catch (e) {
+      await reply(textPayload);
+    }
   }
 };
