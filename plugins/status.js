@@ -1,9 +1,15 @@
 const { downloadMediaMessage } = require("@whiskeysockets/baileys");
 const { getSettings } = require("../database/settingsModel");
 
+// Global Status Cache සහ Processed Messages Tracker
 global.statusCache = global.statusCache || new Map();
+global.processedStatusRequests = global.processedStatusRequests || new Set();
 global.statusHookedSockets = global.statusHookedSockets || new WeakSet();
 
+// බොට් start වූ වෙලාව (බොට් run වෙන්න කලින් ආපු පරණ messages skip කිරීමට)
+const BOT_BOOT_TIME = Math.floor(Date.now() / 1000);
+
+// 1. Status Automation Watcher
 function attachStatusWatcher(sock) {
   if (!sock || global.statusHookedSockets.has(sock)) return;
   global.statusHookedSockets.add(sock);
@@ -14,17 +20,15 @@ function attachStatusWatcher(sock) {
 
       const from = m.key.remoteJid;
 
-      // Status Broadcast Messages පමණක් ගැනීම
+      // Status Broadcast Messages පමණක් අල්ලා ගැනීම
       if (from === "status@broadcast") {
         const statusId = m.key.id;
         const participant = m.key.participant || m.participant;
 
         if (statusId) {
           global.statusCache.set(statusId, m);
-          if (global.statusCache.size > 2000) {
-            const firstKey = global.statusCache.keys().next().value;
-            global.statusCache.delete(firstKey);
-          }
+          // Status එක සාමාන්‍ය ලෙස පැය 12කට පසු auto delete වීම
+          setTimeout(() => global.statusCache.delete(statusId), 12 * 60 * 60 * 1000);
         }
 
         if (m.key.fromMe || !participant) continue;
@@ -32,7 +36,7 @@ function attachStatusWatcher(sock) {
         try {
           const settings = await getSettings();
 
-          // A. 100% Official WhatsApp Protocol Status Seen
+          // Auto Seen
           if (settings.statusSeen !== false) {
             await sock.readMessages([
               {
@@ -40,10 +44,10 @@ function attachStatusWatcher(sock) {
                 id: statusId,
                 participant: participant
               }
-            ]);
+            ]).catch(() => {});
           }
 
-          // B. 100% Status Auto React
+          // Auto React
           if (settings.statusReact !== false) {
             const emoji = settings.reactEmoji || "😘";
             await sock.sendMessage(
@@ -60,7 +64,7 @@ function attachStatusWatcher(sock) {
                 }
               },
               { statusJidList: [participant] }
-            );
+            ).catch(() => {});
           }
         } catch (err) {}
       }
@@ -68,14 +72,15 @@ function attachStatusWatcher(sock) {
   });
 }
 
-async function deliverStatusMedia(sock, msg, from, targetStatusMsg) {
+// 2. Status Media Delivery Helper (Auto-Clean එක්ක)
+async function deliverStatusMedia(sock, msg, from, targetStatusMsg, reqKey) {
   try {
     const statusObj = targetStatusMsg.message;
     const isImage = Boolean(statusObj.imageMessage);
     const isVideo = Boolean(statusObj.videoMessage);
     const isAudio = Boolean(statusObj.audioMessage);
 
-    const defaultCaption = "> *⚡ 𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂 𝐒𝐓𝐀𝐓𝐔𝐒 𝐒𝐀𝐕𝐄𝐑 ❄️*";
+    const defaultCaption = "> *✗ ʜᴇꜱʜᴀɴ ᴏꜰᴄ ✗*";
 
     if (isImage || isVideo || isAudio) {
       const buffer = await downloadMediaMessage(
@@ -106,12 +111,22 @@ async function deliverStatusMedia(sock, msg, from, targetStatusMsg) {
         text: `📝 *STATUS TEXT:*\n\n${textStatus}\n\n${defaultCaption}`
       });
     }
+
+    // Media එක එවූ පසු status cache එකෙන් එම status එක තත්පර 15කින් memory එකෙන් auto clear කිරීම
+    const statusId = targetStatusMsg.key?.id;
+    if (statusId) {
+      setTimeout(() => {
+        global.statusCache.delete(statusId);
+      }, 15 * 1000); // තත්පර 15කින් සම්පූර්ණයෙන් clean වේ
+    }
+
     return true;
   } catch (err) {
     return false;
   }
 }
 
+// 3. Command Module
 module.exports = {
   name: "st",
   aliases: ["status", "stseen", "stract"],
@@ -149,7 +164,7 @@ module.exports = {
         settings.reactEmoji = args[1].trim();
         settings.statusReact = true;
         await settings.save();
-        return await sock.sendMessage(from, { text: `Status React: *${settings.reactEmoji}* (ON 🟢)` });
+        return await sock.sendMessage(from, { text: `Status React Emoji: *${settings.reactEmoji}* (ON 🟢)` });
       }
     }
 
@@ -158,10 +173,23 @@ module.exports = {
     });
   },
 
+  // 4. Interactive Reply Saver (Duplicate Loop Blocks & Auto Cleaning)
   async onReply({ sock, msg, from, body, quotedStanzaId }) {
+    // A. Update/Restart වෙන්න කලින් ආපු පරණ messages නොසලකා හැරීම
+    const msgTime = Number(msg.messageTimestamp || 0);
+    if (msgTime && msgTime < BOT_BOOT_TIME) return false;
+
+    // B. එකම request එක දෙපාරක් execute වීම වැළැක්වීම
+    const requestKey = `${from}_${quotedStanzaId}_${msg.key.id}`;
+    if (global.processedStatusRequests.has(requestKey)) return false;
+
     const rawWord = body.trim().toLowerCase();
-    const triggers = ["oni", "ona", "ewanna", "දෙන්න", "ඕනි", "ඔනි", "send", "save", "දාපන්"];
+    const triggers = ["oni", "ona", "ewanna", "දෙන්න", "ඕනි", "ඔනි", "send", "save", "දාපන්", "dapan", "danna"];
     if (!triggers.includes(rawWord)) return false;
+
+    // මෙම request එක process වූ බව සටහන් කර ගැනීම
+    global.processedStatusRequests.add(requestKey);
+    setTimeout(() => global.processedStatusRequests.delete(requestKey), 60 * 1000);
 
     const quotedMsg = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
     const target = global.statusCache.get(quotedStanzaId) || (quotedMsg ? {
@@ -170,6 +198,7 @@ module.exports = {
     } : null);
 
     if (!target) return false;
-    return await deliverStatusMedia(sock, msg, from, target);
+
+    return await deliverStatusMedia(sock, msg, from, target, requestKey);
   }
 };
