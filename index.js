@@ -349,7 +349,7 @@ app.get("/get-code", async (req, res) => {
     }
 
     const s = await createSocket();
-    if (!s.authState.creds.registered) {
+    if (!s.authState?.creds?.registered) {
       await delay(3000);
       const code = await s.requestPairingCode(cleanNum);
       return res.json({ code: code?.match(/.{1,4}/g)?.join("-") || code });
@@ -380,18 +380,26 @@ async function handleMessage(waSock, msg) {
   const ts = Number(msg.messageTimestamp) || 0;
   if (ts && Date.now() / 1000 - ts > 60) return;
 
-  const mType = Object.keys(msg.message)[0];
+  // Unwrap ViewOnce & Ephemeral messages
+  let messageContent = msg.message;
+  if (messageContent?.ephemeralMessage) messageContent = messageContent.ephemeralMessage.message;
+  if (messageContent?.viewOnceMessage) messageContent = messageContent.viewOnceMessage.message;
+  if (messageContent?.viewOnceMessageV2) messageContent = messageContent.viewOnceMessageV2.message;
+  if (!messageContent) return;
+
+  const mType = Object.keys(messageContent)[0];
   const body = (
-    msg.message.conversation ||
-    msg.message.extendedTextMessage?.text ||
-    msg.message[mType]?.caption ||
+    messageContent.conversation ||
+    messageContent.extendedTextMessage?.text ||
+    messageContent[mType]?.caption ||
+    messageContent[mType]?.text ||
     ""
   ).trim();
 
   const ownerClean = idOf(CONFIG.OWNER_NUMBER);
   const myNumber = idOf(waSock.user?.id) || ownerClean;
   const myLid = idOf(waSock.user?.lid);
-  const sender = msg.key.fromMe ? myNumber : idOf(msg.key.participant || from);
+  const sender = msg.key.fromMe ? myNumber : idOf(msg.key.participant || msg.participant || from);
   const isOwner = !!(msg.key.fromMe || sender === ownerClean || sender === myNumber || (myLid && sender === myLid));
   const isPublic = (settings?.get ? settings.get("mode") || "public" : "public") === "public";
 
@@ -424,12 +432,16 @@ async function handleMessage(waSock, msg) {
   const command = commands.get(cmdName) || aliases.get(cmdName);
   if (!command) return;
 
+  // Pass complete un-split text cleanly
+  const fullText = body.slice(prefix.length).trim().slice(trigger.length).trim();
+  const contextInfo = messageContent.extendedTextMessage?.contextInfo || messageContent[mType]?.contextInfo;
+
   try {
     await command.execute({
       sock: waSock,
       msg,
       args,
-      text: args.join(" "),
+      text: fullText,
       body,
       from,
       jid,
@@ -438,53 +450,4 @@ async function handleMessage(waSock, msg) {
       isOwner,
       reply,
       send,
-      sendVoice,
-      react,
-      isSelfChat,
-      settings,
-      downloadMedia: () => downloadMediaMessage(msg, "buffer", {}),
-      quoted: msg.message.extendedTextMessage?.contextInfo?.quotedMessage || null
-    });
-  } catch (err) {
-    console.error(`Command [${cmdName}] Error:`, err.message);
-  }
-}
-
-// ==========================================
-// 5. App Startup & Clean Shutdown
-// ==========================================
-async function startBot() {
-  try {
-    loadPlugins();
-    if (typeof settings?.load === "function") await settings.load();
-    const { state } = await useMongoAuthState();
-    if (state.creds?.registered) {
-      console.log("♻️ Saved session detected. Connecting...");
-      await createSocket();
-    } else {
-      console.log("ℹ️ Bot not paired. Please use the Web portal to pair.");
-    }
-  } catch (e) {
-    scheduleReconnect(5000);
-  }
-}
-
-async function shutdown() {
-  if (reconnectTimer) clearTimeout(reconnectTimer);
-  killSocket();
-  if (typeof flushWrites === "function") await Promise.race([flushWrites(), delay(5000)]);
-  process.exit(0);
-}
-
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
-
-const publicUrl = process.env.RENDER_EXTERNAL_URL || process.env.APP_URL;
-if (publicUrl) {
-  setInterval(() => axios.get(`${publicUrl}/health`, { timeout: 10000 }).catch(() => {}), 4 * 60 * 1000);
-}
-
-app.listen(CONFIG.PORT, "0.0.0.0", () => {
-  console.log(`🌐 [SERVER] Web Portal running on port ${CONFIG.PORT}`);
-  startBot();
-});
+      sendVoice
