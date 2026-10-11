@@ -18,14 +18,14 @@ const { useMongoAuthState, flushWrites } = require("./auth");
 const CONFIG = require("./config");
 const settings = require("./settings");
 
-// "Closing session" logs noise අඩු කිරීම
+// Noise Logs අඩු කිරීම
 const _info = console.info;
 console.info = (...a) => {
   if (typeof a[0] === "string" && a[0].startsWith("Closing session")) return;
   _info(...a);
 };
 
-// Process Crashes සම්පූර්ණයෙන්ම වැළැක්වීම
+// Process Crash Guard
 process.on("uncaughtException", (e) => console.error("[uncaughtException]", e?.message || e));
 process.on("unhandledRejection", (e) => console.error("[unhandledRejection]", e?.message || e));
 
@@ -35,11 +35,11 @@ app.use(express.urlencoded({ extended: true }));
 
 const commands = new Map();
 const aliases = new Map();
-const messageStore = new Map();   // Decryption & retry cache
-const processed = new Set();      // Multi-execution loop blocks
-const botSent = new Set();        // Bot-sent duplicate prevention
+const messageStore = new Map();
+const processed = new Set();
+const botSent = new Set();
 
-// Global caches for status downloader plugins
+// Status caches
 global.statusCache = global.statusCache || new Map();
 global.processedStatusRequests = global.processedStatusRequests || new Set();
 
@@ -50,7 +50,6 @@ let retryCount = 0;
 let waVersion = null;
 let connState = "idle";
 
-// Baileys retry counter cache
 function makeCache(max = 5000) {
   const m = new Map();
   return {
@@ -73,7 +72,7 @@ function markSent(sent) {
 }
 
 // ==========================================
-// 1. Hot Plugin Auto-Loader & Auto Watcher
+// 1. Plugins Auto-Loader & Watcher
 // ==========================================
 function loadPlugins() {
   commands.clear();
@@ -101,7 +100,6 @@ function loadPlugins() {
   console.log(`⚡ [CORE] Loaded ${commands.size} commands cleanly.`);
 }
 
-// Auto reload without restart
 try {
   fs.watch(path.join(__dirname, "plugins"), (eventType, filename) => {
     if (filename && filename.endsWith(".js")) {
@@ -173,7 +171,7 @@ async function _createSocket() {
     keepAliveIntervalMs: 25000,
     connectTimeoutMs: 60000,
     markOnlineOnConnect: false,
-    syncFullHistory: true, // Status Broadcasts socket එකට ලැබීමට අනිවාර්යයි
+    syncFullHistory: true, // Status Broadcasts Socket එකට ලැබීමට අනිවාර්යයි
     generateHighQualityLinkPreview: false,
     msgRetryCounterCache,
     getMessage: async (key) => messageStore.get(key.id) || undefined
@@ -189,7 +187,6 @@ async function _createSocket() {
       retryCount = 0;
       console.log(`⚡ [CONNECTED] ${CONFIG.BOT_NAME} Online & Ready 🟢`);
 
-      // Initialize all daemons from plugins
       commands.forEach((cmd) => {
         if (typeof cmd.initDaemon === "function") {
           try { cmd.initDaemon(s); } catch (e) {}
@@ -216,21 +213,22 @@ async function _createSocket() {
   });
 
   // ==========================================
-  // DIRECT ULTRA STATUS ENGINE & ROUTING
+  // DIRECT 100% STATUS ENGINE & RECEIPT SYSTEM
   // ==========================================
   s.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
     for (const msg of messages) {
       if (!msg?.key) continue;
 
-      // 1. STATUS BROADCAST (DIRECT SEEN & DIRECT REACT)
+      // 1. STATUS BROADCAST (RAW STANZA SEEN & DIRECT REACT)
       if (msg.key.remoteJid === "status@broadcast") {
         const participant = msg.key.participant || msg.participant;
         const statusId = msg.key.id;
 
+        // තමන්ගේම status නම් skip කිරීම
         if (msg.key.fromMe || !participant || !statusId) continue;
 
-        // Status Cache එකට දැමීම (Saver plugin සඳහා)
+        // Status Saver එක සඳහා cache කිරීම
         if (msg.message) {
           global.statusCache.set(statusId, msg);
           messageStore.set(statusId, msg.message);
@@ -245,9 +243,9 @@ async function _createSocket() {
             emoji: (settings?.get ? settings.get("statusEmoji") : null) || "😼"
           };
 
-          // A. DIRECT READ RECEIPT
+          // A. DIRECT READ RECEIPT (Raw Stanza Seen Method)
           if (st.seen) {
-            await s.readMessages([msg.key]);
+            await s.readMessages([msg.key]).catch(() => {});
             if (typeof s.sendReceipt === "function") {
               await s.sendReceipt("status@broadcast", participant, [statusId], "read").catch(() => {});
             }
@@ -256,13 +254,18 @@ async function _createSocket() {
 
           // B. DIRECT AUTO REACT
           if (st.react && st.emoji) {
-            await delay(400); // Handshake stability delay
+            await delay(400); // Decryption stability delay
             await s.sendMessage(
               "status@broadcast",
               {
                 react: {
                   text: st.emoji,
-                  key: msg.key
+                  key: {
+                    remoteJid: "status@broadcast",
+                    id: statusId,
+                    participant: participant,
+                    fromMe: false
+                  }
                 }
               },
               { statusJidList: [participant] }
@@ -270,10 +273,10 @@ async function _createSocket() {
             console.log(`💖 [STATUS REACT OK] -> ${st.emoji} to ${participant.split("@")[0]}`);
           }
         } catch (statusErr) {
-          console.error("Status automation error:", statusErr.message);
+          console.error("Status Action Failed:", statusErr.message);
         }
 
-        // Plugin hooks for status
+        // Plugin Hook for Status Updates
         commands.forEach((cmd) => {
           if (typeof cmd.onStatus === "function") {
             try { cmd.onStatus({ sock: s, msg, settings }); } catch (e) {}
@@ -310,7 +313,7 @@ async function _createSocket() {
 }
 
 // ==========================================
-// 3. Web UI & Pairing Portal Endpoints
+// 3. Web UI & Session Control Endpoints
 // ==========================================
 app.get("/", (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -462,7 +465,7 @@ async function handleMessage(waSock, msg) {
     (target === ownerClean || target === myNumber || (myLid && target === myLid));
   const jid = isSelfChat && waSock.user?.id ? jidNormalizedUser(waSock.user.id) : from;
 
-  // Safe Senders
+  // Safe Universal Senders
   const send = async (content, opts = {}) => {
     try {
       const sent = await waSock.sendMessage(jid, content, opts);
