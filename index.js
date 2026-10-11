@@ -30,9 +30,12 @@ mongoose.connect(MONGO_URI)
     .then(() => console.log('✅ MongoDB Connected to 𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂!'))
     .catch(err => console.log('❌ DB Error:', err));
 
-// Bot Command Engine
-function registerCommands(sock) {
-    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+let sock = null;
+let isPairingInProgress = false; // Code එක confirm කරනකල් restart වීම block කරනවා
+
+// Register Bot Commands
+function registerCommands(socket) {
+    socket.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
         const msg = messages[0];
         if (!msg.message) return;
@@ -43,8 +46,8 @@ function registerCommands(sock) {
 
         // Auto Status Seen & React
         if (sender === 'status@broadcast') {
-            await sock.readMessages([msg.key]);
-            await sock.sendMessage(sender, { react: { text: '🩷', key: msg.key } });
+            await socket.readMessages([msg.key]);
+            await socket.sendMessage(sender, { react: { text: '🩷', key: msg.key } });
             return;
         }
 
@@ -63,7 +66,7 @@ function registerCommands(sock) {
             const cmdPath = path.join(__dirname, 'commands', `${command}.js`);
             if (fs.existsSync(cmdPath)) {
                 const cmd = require(cmdPath);
-                await cmd.execute(sock, msg, args, isDev, BOT_NAME);
+                await cmd.execute(socket, msg, args, isDev, BOT_NAME);
             }
         } catch (error) {
             console.error(`Error executing ${command}:`, error);
@@ -71,18 +74,18 @@ function registerCommands(sock) {
     });
 }
 
-// Global active bot starter
+// Start Main Bot Engine
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('./session');
 
-    const sock = makeWASocket({
+    sock = makeWASocket({
         auth: {
             creds: state.creds,
             keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'fatal' }))
         },
         printQRInTerminal: false,
         logger: pino({ level: 'fatal' }),
-        browser: Browsers.macOS('Desktop'),
+        browser: Browsers.ubuntu('Chrome'), // ✅ Chrome Browser identity on Linux
         defaultQueryTimeoutMs: undefined,
         syncFullHistory: false
     });
@@ -97,29 +100,42 @@ async function startBot() {
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect } = update;
-        
+
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
+            console.log(`Connection closed with code: ${statusCode}`);
+
+            // Code එක phone එකට ගහන වෙලාවේ socket restart වෙන්න නොදී lock කර තබයි
+            if (isPairingInProgress) {
+                console.log('⏳ Pairing in progress, waiting for device confirmation...');
+                return;
+            }
+
             if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-                console.log('❌ Logged Out. Clearing Session...');
+                console.log('❌ Logged Out. Clearing session...');
                 if (fs.existsSync('./session')) fs.rmSync('./session', { recursive: true, force: true });
                 await deleteSession('main_session');
+                setTimeout(startBot, 3000);
             } else {
-                console.log('⚠️ Reconnecting in 5s...');
-                setTimeout(startBot, 5000);
+                setTimeout(startBot, 3000);
             }
         } else if (connection === 'open') {
-            console.log(`✅ ${BOT_NAME} Connected & Active!`);
+            console.log(`✅ ${BOT_NAME} Connected & Fully Active!`);
+            isPairingInProgress = false;
             registerCommands(sock);
             try {
-                await sock.sendMessage(devs[0], { text: `🚀 *${BOT_NAME}* Successfully Activated!` });
+                await sock.sendMessage(devs[0], { text: `🚀 *${BOT_NAME}* Successfully Connected!` });
             } catch (e) {}
         }
     });
 }
 
-// Web UI
-app.get('/', (req, res) => {
+// ==========================================
+// 🌐 Pairing Web Portal
+// ==========================================
+app.get('/', (req, res) => res.redirect('/pair'));
+
+app.get('/pair', (req, res) => {
     res.send(`
     <!DOCTYPE html>
     <html lang="en">
@@ -140,7 +156,7 @@ app.get('/', (req, res) => {
             button:hover { background: #00c853; }
             button:disabled { background: #444; color: #888; cursor: not-allowed; }
             #resultBox { margin-top: 20px; display: none; }
-            .code-display { background: rgba(0, 230, 118, 0.08); border: 2px dashed #00e676; padding: 15px; border-radius: 12px; font-size: 32px; font-weight: 700; letter-spacing: 5px; color: #00e676; cursor: pointer; user-select: all; }
+            .code-display { background: rgba(0, 230, 118, 0.08); border: 2px dashed #00e676; padding: 15px; border-radius: 12px; font-size: 32px; font-weight: 700; letter-spacing: 5px; color: #00e676; cursor: pointer; }
             .error-box { background: rgba(255, 68, 68, 0.1); border: 1px solid rgba(255, 68, 68, 0.2); color: #ff5252; padding: 12px; border-radius: 10px; font-size: 13px; margin-top: 15px; display: none; }
             .footer { margin-top: 25px; font-size: 11px; color: #556270; }
         </style>
@@ -148,7 +164,7 @@ app.get('/', (req, res) => {
     <body>
         <div class="card">
             <h1>${BOT_NAME}</h1>
-            <p>Enter your phone number to get the Pairing Code</p>
+            <p>Enter your phone number to pair with Chrome engine</p>
             
             <input type="text" id="phone" placeholder="94719845166" autocomplete="off">
             <button id="btn" onclick="getCode()">Get Pair Code</button>
@@ -156,9 +172,9 @@ app.get('/', (req, res) => {
             <div id="error" class="error-box"></div>
 
             <div id="resultBox">
-                <p style="color: #bbb; margin-bottom: 10px;">Click below to copy your code:</p>
+                <p style="color: #bbb; margin-bottom: 10px;">Click to copy your code:</p>
                 <div class="code-display" id="codeText" onclick="copyCode()"></div>
-                <p style="font-size: 12px; color: #00e676; margin-top: 10px;">⏳ Enter this on WhatsApp now! Connecting automatically...</p>
+                <p style="font-size: 12px; color: #00e676; margin-top: 10px;">⚡ Enter on WhatsApp now! Linked automatically.</p>
             </div>
 
             <div class="footer">© 2026 ${BOT_NAME} • Ultra Fast Pairing</div>
@@ -182,7 +198,7 @@ app.get('/', (req, res) => {
                 err.style.display = "none";
                 resBox.style.display = "none";
                 btn.disabled = true;
-                btn.innerText = "Generating Code...";
+                btn.innerText = "Requesting Code...";
 
                 try {
                     const response = await fetch('/api/pair?phone=' + phone);
@@ -207,7 +223,7 @@ app.get('/', (req, res) => {
             function copyCode() {
                 const text = document.getElementById('codeText').innerText;
                 navigator.clipboard.writeText(text);
-                alert("Code copied to clipboard: " + text);
+                alert("Code copied: " + text);
             }
         </script>
     </body>
@@ -215,80 +231,50 @@ app.get('/', (req, res) => {
     `);
 });
 
-// Pairing Code Generator (Keeps socket alive so WhatsApp links instantly)
+// Single Direct Pairing API
 app.get('/api/pair', async (req, res) => {
     let phone = req.query.phone;
     if (!phone) return res.json({ status: false, message: 'Phone number is required' });
 
     phone = phone.replace(/[^0-9]/g, '');
 
-    // Reset session folder for clean link
-    if (fs.existsSync('./session')) fs.rmSync('./session', { recursive: true, force: true });
-
     try {
-        const { state, saveCreds } = await useMultiFileAuthState('./session');
+        if (!sock) {
+            return res.json({ status: false, message: 'Bot engine is initializing. Please wait 5s.' });
+        }
 
-        const sock = makeWASocket({
-            auth: {
-                creds: state.creds,
-                keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'fatal' }))
-            },
-            printQRInTerminal: false,
-            logger: pino({ level: 'fatal' }),
-            browser: Browsers.macOS('Desktop'),
-            defaultQueryTimeoutMs: undefined,
-            syncFullHistory: false
-        });
+        if (sock.authState?.creds?.registered) {
+            return res.json({ status: false, message: 'Bot is already connected to WhatsApp!' });
+        }
 
-        sock.ev.on('creds.update', async () => {
-            await saveCreds();
-            if (fs.existsSync('./session/creds.json')) {
-                const creds = JSON.parse(fs.readFileSync('./session/creds.json', 'utf-8'));
-                await saveSession('main_session', creds);
-            }
-        });
-
-        // Connection Handler: Stays active after code is entered on phone
-        sock.ev.on('connection.update', async (update) => {
-            const { connection } = update;
-            if (connection === 'open') {
-                console.log(`✅ ${BOT_NAME} Connected via Pairing Code!`);
-                await delay(2000);
-                if (fs.existsSync('./session/creds.json')) {
-                    const creds = JSON.parse(fs.readFileSync('./session/creds.json', 'utf-8'));
-                    await saveSession('main_session', creds);
-                }
-                registerCommands(sock);
-                try {
-                    await sock.sendMessage(devs[0], { text: `🚀 *${BOT_NAME}* Successfully Linked!` });
-                } catch(e) {}
-            }
-        });
-
-        // Small delay to let WhatsApp server acknowledge pairing socket
-        await delay(3000);
+        // Lock socket to prevent auto-restart while user is linking
+        isPairingInProgress = true;
 
         let code = await sock.requestPairingCode(phone);
         code = code?.match(/.{1,4}/g)?.join('-') || code;
+
+        // Auto release lock after 60s
+        setTimeout(() => { isPairingInProgress = false; }, 60000);
 
         return res.json({ status: true, code });
 
     } catch (err) {
         console.error('Pairing Error:', err);
-        return res.json({ status: false, message: 'Server busy. Wait 5s and try again.' });
+        isPairingInProgress = false;
+        return res.json({ status: false, message: 'WhatsApp error. Please try again in 5 seconds.' });
     }
 });
 
-// App Entry
+// Server Startup
 app.listen(PORT, async () => {
     console.log(`🌐 Server running on port ${PORT}`);
+    
     const savedCreds = await getSession('main_session');
     if (savedCreds) {
         if (!fs.existsSync('./session')) fs.mkdirSync('./session', { recursive: true });
         fs.writeFileSync('./session/creds.json', JSON.stringify(savedCreds, null, 2));
-        console.log('🔑 Existing session loaded from MongoDB. Starting Bot...');
-        startBot();
-    } else {
-        console.log('ℹ️ No active session. Waiting for pairing via web...');
+        console.log('🔑 Session found in MongoDB.');
     }
+    
+    startBot();
 });
