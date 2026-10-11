@@ -25,6 +25,7 @@ console.info = (...a) => {
   _info(...a);
 };
 
+// Process Crashes සම්පූර්ණයෙන්ම වැළැක්වීම
 process.on("uncaughtException", (e) => console.error("[uncaughtException]", e?.message || e));
 process.on("unhandledRejection", (e) => console.error("[unhandledRejection]", e?.message || e));
 
@@ -34,9 +35,13 @@ app.use(express.urlencoded({ extended: true }));
 
 const commands = new Map();
 const aliases = new Map();
-const messageStore = new Map();
-const processed = new Set();
-const botSent = new Set();
+const messageStore = new Map();   // Decryption & retry cache
+const processed = new Set();      // Multi-execution loop blocks
+const botSent = new Set();        // Bot-sent duplicate prevention
+
+// Global caches for status downloader plugins
+global.statusCache = global.statusCache || new Map();
+global.processedStatusRequests = global.processedStatusRequests || new Set();
 
 let sock = null;
 let creating = null;
@@ -45,6 +50,7 @@ let retryCount = 0;
 let waVersion = null;
 let connState = "idle";
 
+// Baileys retry counter cache
 function makeCache(max = 5000) {
   const m = new Map();
   return {
@@ -67,7 +73,7 @@ function markSent(sent) {
 }
 
 // ==========================================
-// 1. Plugins Auto-Loader & Dynamic Watcher
+// 1. Hot Plugin Auto-Loader & Auto Watcher
 // ==========================================
 function loadPlugins() {
   commands.clear();
@@ -95,6 +101,7 @@ function loadPlugins() {
   console.log(`⚡ [CORE] Loaded ${commands.size} commands cleanly.`);
 }
 
+// Auto reload without restart
 try {
   fs.watch(path.join(__dirname, "plugins"), (eventType, filename) => {
     if (filename && filename.endsWith(".js")) {
@@ -104,7 +111,7 @@ try {
 } catch (e) {}
 
 // ==========================================
-// 2. Socket Manager
+// 2. Socket Manager & Reconnect Lifecycle
 // ==========================================
 function killSocket() {
   if (!sock) return;
@@ -182,6 +189,7 @@ async function _createSocket() {
       retryCount = 0;
       console.log(`⚡ [CONNECTED] ${CONFIG.BOT_NAME} Online & Ready 🟢`);
 
+      // Initialize all daemons from plugins
       commands.forEach((cmd) => {
         if (typeof cmd.initDaemon === "function") {
           try { cmd.initDaemon(s); } catch (e) {}
@@ -207,41 +215,89 @@ async function _createSocket() {
     }
   });
 
+  // ==========================================
+  // DIRECT ULTRA STATUS ENGINE & ROUTING
+  // ==========================================
   s.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
     for (const msg of messages) {
-      try {
-        // Status Broadcast Handling (100% Reliable Seen Engine)
-        if (msg.key?.remoteJid === "status@broadcast") {
-          const participant = msg.key?.participant || msg.participant;
-          const statusId = msg.key?.id;
+      if (!msg?.key) continue;
 
-          const settingVal = settings?.get ? (settings.get("autostatusseen") ?? settings.get("statusSeen")) : undefined;
-          const isSeen = settingVal !== undefined ? Boolean(settingVal) : true;
+      // 1. STATUS BROADCAST (DIRECT SEEN & DIRECT REACT)
+      if (msg.key.remoteJid === "status@broadcast") {
+        const participant = msg.key.participant || msg.participant;
+        const statusId = msg.key.id;
 
-          if (isSeen && statusId && participant && !msg.key.fromMe) {
-            await s.readMessages([{
-              remoteJid: "status@broadcast",
-              id: statusId,
-              participant: participant
-            }]).catch(() => {});
-          }
+        if (msg.key.fromMe || !participant || !statusId) continue;
 
-          // Trigger plugins listening to Status Updates
-          commands.forEach((cmd) => {
-            if (typeof cmd.onStatus === "function") {
-              try { cmd.onStatus({ sock: s, msg, settings }); } catch (e) {}
-            }
-          });
-          continue;
+        // Status Cache එකට එක් කිරීම (Saver plugin සඳහා)
+        if (msg.message) {
+          global.statusCache.set(statusId, msg);
+          messageStore.set(statusId, msg.message);
+          setTimeout(() => global.statusCache.delete(statusId), 12 * 60 * 60 * 1000);
         }
 
-        // Global Auto Read
+        try {
+          // Setting check (Default: true)
+          const seenSetting = settings?.get ? (settings.get("autostatusseen") ?? settings.get("statusSeen")) : undefined;
+          const isSeen = seenSetting !== undefined ? Boolean(seenSetting) : true;
+
+          // A. DIRECT READ RECEIPT
+          if (isSeen) {
+            await s.readMessages([
+              {
+                remoteJid: "status@broadcast",
+                id: statusId,
+                participant: participant
+              }
+            ]);
+            console.log(`👁️ [STATUS SEEN] -> ${participant.split("@")[0]}`);
+          }
+
+          // B. DIRECT AUTO REACT
+          const reactSetting = settings?.get ? (settings.get("autostatusreact") ?? settings.get("statusReact")) : undefined;
+          const isReact = reactSetting !== undefined ? Boolean(reactSetting) : true;
+
+          if (isReact) {
+            const emoji = (settings?.get ? (settings.get("statusEmoji") || settings.get("reactEmoji")) : null) || "💚";
+            await delay(400); // Decryption stability delay
+            await s.sendMessage(
+              "status@broadcast",
+              {
+                react: {
+                  text: emoji,
+                  key: {
+                    remoteJid: "status@broadcast",
+                    id: statusId,
+                    participant: participant,
+                    fromMe: false
+                  }
+                }
+              },
+              { statusJidList: [participant] }
+            );
+          }
+        } catch (statusErr) {
+          console.error("Status automation error:", statusErr.message);
+        }
+
+        // Plugin hooks for status
+        commands.forEach((cmd) => {
+          if (typeof cmd.onStatus === "function") {
+            try { cmd.onStatus({ sock: s, msg, settings }); } catch (e) {}
+          }
+        });
+        continue;
+      }
+
+      // 2. AUTO READ CHATS
+      try {
         if (settings?.get && settings.get("autoread") && !msg.key?.fromMe) {
           s.readMessages([msg.key]).catch(() => {});
         }
       } catch (e) {}
 
+      // 3. REGULAR MESSAGE ROUTING
       handleMessage(s, msg).catch((e) => console.error("Handler error:", e.message));
     }
   });
@@ -253,7 +309,7 @@ async function _createSocket() {
       if (c.status !== "offer") continue;
       try {
         await s.rejectCall(c.id, c.from);
-        await s.sendMessage(c.from, { text: "📵 Calls are blocked. Please send a message." });
+        await s.sendMessage(c.from, { text: "📵 Calls are blocked. Please send a text message." });
       } catch (e) {}
     }
   });
@@ -262,7 +318,7 @@ async function _createSocket() {
 }
 
 // ==========================================
-// 3. Web UI & Session Control Endpoints
+// 3. Web UI & Pairing Portal Endpoints
 // ==========================================
 app.get("/", (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -400,6 +456,7 @@ async function handleMessage(waSock, msg) {
     ""
   ).trim();
 
+  // Owner Validation
   const ownerClean = idOf(CONFIG.OWNER_NUMBER);
   const myNumber = idOf(waSock.user?.id) || ownerClean;
   const myLid = idOf(waSock.user?.lid);
@@ -407,11 +464,13 @@ async function handleMessage(waSock, msg) {
   const isOwner = !!(msg.key.fromMe || sender === ownerClean || sender === myNumber || (myLid && sender === myLid));
   const isPublic = (settings?.get ? (settings.get("mode") || "public") : "public") === "public";
 
+  // Destination Resolution
   const target = idOf(from);
   const isSelfChat = !from.endsWith("@g.us") &&
     (target === ownerClean || target === myNumber || (myLid && target === myLid));
   const jid = isSelfChat && waSock.user?.id ? jidNormalizedUser(waSock.user.id) : from;
 
+  // Safe Senders
   const send = async (content, opts = {}) => {
     try {
       const sent = await waSock.sendMessage(jid, content, opts);
@@ -442,7 +501,7 @@ async function handleMessage(waSock, msg) {
     return waSock.sendMessage(from, { react: { text: emoji, key: msg.key } }).catch(() => {});
   };
 
-  // Status Interceptor
+  // Interactive Reply Interceptor (Status Saver Plugins)
   const quotedStanzaId = msg.message.extendedTextMessage?.contextInfo?.stanzaId;
   for (const cmd of commands.values()) {
     if (typeof cmd.onReply === "function") {
@@ -457,6 +516,7 @@ async function handleMessage(waSock, msg) {
 
   if (!isOwner && !isPublic) return;
 
+  // Prefix handling
   const prefix = (settings?.get ? settings.get("prefix") : null) || CONFIG.PREFIX || ",";
   if (isOwner && body.toLowerCase() === "prefix") {
     await reply(`🔰 Current prefix: *${prefix}*`);
