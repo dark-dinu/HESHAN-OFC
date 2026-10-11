@@ -2,7 +2,7 @@ const {
     default: makeWASocket, 
     useMultiFileAuthState, 
     DisconnectReason, 
-    Browsers, 
+    delay, 
     makeCacheableSignalKeyStore 
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
@@ -10,9 +10,13 @@ const mongoose = require('mongoose');
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const { saveSession, getSession, deleteSession } = require('./auth');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // Configs
 const MONGO_URI = "mongodb+srv://diniduheshan40_db_user:Heshan2007@cluster0.5gazebm.mongodb.net/?appName=Cluster0";
@@ -21,41 +25,13 @@ const devs = ['94719845166@s.whatsapp.net', '15947733680169@s.whatsapp.net'];
 
 global.botSettings = { mode: 'public' };
 
-// MongoDB Connection
+// Connect Database
 mongoose.connect(MONGO_URI)
-    .then(() => console.log('✅ MongoDB Connected!'))
+    .then(() => console.log('✅ MongoDB Connected to 𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂!'))
     .catch(err => console.log('❌ DB Error:', err));
 
-const sessionSchema = new mongoose.Schema({
-    id: { type: String, default: 'session' },
-    creds: { type: Object }
-});
-const SessionModel = mongoose.model('BotSession', sessionSchema);
-
-async function backupSessionToDB() {
-    try {
-        if (fs.existsSync('./session/creds.json')) {
-            const creds = JSON.parse(fs.readFileSync('./session/creds.json', 'utf-8'));
-            await SessionModel.findOneAndUpdate({ id: 'session' }, { creds }, { upsert: true });
-            console.log('☁️ Session backed up to MongoDB!');
-        }
-    } catch (e) {}
-}
-
-async function restoreSessionFromDB() {
-    try {
-        const data = await SessionModel.findOne({ id: 'session' });
-        if (data && data.creds) {
-            if (!fs.existsSync('./session')) fs.mkdirSync('./session', { recursive: true });
-            fs.writeFileSync('./session/creds.json', JSON.stringify(data.creds, null, 2));
-            return true;
-        }
-    } catch (e) {}
-    return false;
-}
-
-// Bot Command Handler Setup
-function setupBotHandlers(sock) {
+// Bot Command Execution Engine
+function registerCommands(sock) {
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
         const msg = messages[0];
@@ -65,13 +41,14 @@ function setupBotHandlers(sock) {
         const isMe = msg.key.fromMe;
         const isDev = devs.includes(msg.participant || sender);
 
-        // 🩷 Auto Status Seen & React
+        // Auto Status Seen & React
         if (sender === 'status@broadcast') {
             await sock.readMessages([msg.key]);
             await sock.sendMessage(sender, { react: { text: '🩷', key: msg.key } });
             return;
         }
 
+        // Mode Rules
         if (global.botSettings.mode === 'private' && !isDev && !isMe) return;
         if (global.botSettings.mode === 'group' && !sender.endsWith('@g.us') && !isDev) return;
 
@@ -90,57 +67,62 @@ function setupBotHandlers(sock) {
                 await cmd.execute(sock, msg, args, isDev, BOT_NAME);
             }
         } catch (error) {
-            console.error(error);
+            console.error(`Error executing ${command}:`, error);
         }
     });
 }
 
-// Active Bot Starter
+// Main Running Bot
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('./session');
 
     const sock = makeWASocket({
         auth: {
             creds: state.creds,
-            keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }))
+            keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'fatal' }))
         },
         printQRInTerminal: false,
-        logger: pino({ level: 'silent' }),
-        browser: Browsers.ubuntu('Chrome')
+        logger: pino({ level: 'fatal' }),
+        browser: ['Ubuntu', 'Chrome', '20.0.04']
     });
 
     sock.ev.on('creds.update', async () => {
         await saveCreds();
-        await backupSessionToDB();
+        if (fs.existsSync('./session/creds.json')) {
+            const creds = JSON.parse(fs.readFileSync('./session/creds.json', 'utf-8'));
+            await saveSession('main_session', creds);
+        }
     });
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect } = update;
+        
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
+                console.log('❌ Logged Out. Clearing Session...');
                 if (fs.existsSync('./session')) fs.rmSync('./session', { recursive: true, force: true });
-                await SessionModel.deleteOne({ id: 'session' });
+                await deleteSession('main_session');
             } else {
+                console.log('⚠️ Reconnecting in 5s...');
                 setTimeout(startBot, 5000);
             }
         } else if (connection === 'open') {
-            console.log(`✅ ${BOT_NAME} is Online!`);
-            await backupSessionToDB();
-            setupBotHandlers(sock);
+            console.log(`✅ ${BOT_NAME} Connected & Active!`);
+            registerCommands(sock);
+            try {
+                await sock.sendMessage(devs[0], { text: `🚀 *${BOT_NAME}* Successfully Activated!` });
+            } catch (e) {}
         }
     });
 }
 
 // ==========================================
-// 🌐 Pairing Site UI & Route
+// 🌐 Pairing Web Portal (Fast & Reliable)
 // ==========================================
-app.get('/', (req, res) => res.redirect('/pair'));
 
-app.get('/pair', async (req, res) => {
-    let phone = req.query.phone;
-
-    const renderUI = (content) => `
+app.get('/', (req, res) => {
+    res.send(`
     <!DOCTYPE html>
     <html lang="en">
     <head>
@@ -150,54 +132,102 @@ app.get('/pair', async (req, res) => {
         <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap" rel="stylesheet">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Poppins', sans-serif; }
-            body { background: #0c0f14; color: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }
-            .container { background: rgba(255, 255, 255, 0.04); backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 24px; padding: 40px 30px; max-width: 440px; width: 100%; text-align: center; }
-            h1 { font-size: 26px; color: #00e676; margin-bottom: 8px; font-weight: 700; }
-            p { font-size: 13px; color: #8f9bba; margin-bottom: 25px; line-height: 1.6; }
-            input[type="text"] { width: 100%; padding: 16px; border: 1px solid rgba(255,255,255,0.1); border-radius: 14px; background: rgba(255,255,255,0.06); color: #fff; font-size: 16px; margin-bottom: 18px; outline: none; text-align: center; }
-            input[type="text"]:focus { border-color: #00e676; }
-            button { width: 100%; padding: 16px; border: none; border-radius: 14px; background: #00e676; color: #0c0f14; font-size: 15px; font-weight: 700; cursor: pointer; transition: 0.3s; }
-            button:hover { background: #00c853; transform: scale(1.02); }
-            .code-box { background: rgba(0, 230, 118, 0.05); padding: 18px; border-radius: 14px; font-size: 32px; font-weight: 700; letter-spacing: 5px; color: #00e676; margin: 15px 0 25px; border: 2px dashed #00e676; display: inline-block; width: 100%; }
-            .error { color: #ff5252; font-size: 13px; margin-top: 15px; background: rgba(255, 82, 82, 0.1); padding: 12px; border-radius: 10px; }
-            .footer { margin-top: 30px; font-size: 11px; color: #5a657d; }
+            body { background: #0b0e14; color: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }
+            .card { background: rgba(255, 255, 255, 0.03); backdrop-filter: blur(15px); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 20px; padding: 35px 25px; max-width: 420px; width: 100%; text-align: center; box-shadow: 0 15px 35px rgba(0,0,0,0.5); }
+            h1 { font-size: 24px; color: #00e676; margin-bottom: 6px; font-weight: 700; }
+            p { font-size: 13px; color: #8a99ad; margin-bottom: 25px; }
+            input { width: 100%; padding: 15px; border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; background: rgba(255,255,255,0.05); color: #fff; font-size: 16px; margin-bottom: 15px; outline: none; text-align: center; }
+            input:focus { border-color: #00e676; box-shadow: 0 0 10px rgba(0, 230, 118, 0.2); }
+            button { width: 100%; padding: 15px; border: none; border-radius: 12px; background: #00e676; color: #000; font-size: 15px; font-weight: 700; cursor: pointer; transition: 0.2s; }
+            button:hover { background: #00c853; }
+            button:disabled { background: #444; color: #888; cursor: not-allowed; }
+            #resultBox { margin-top: 20px; display: none; }
+            .code-display { background: rgba(0, 230, 118, 0.08); border: 2px dashed #00e676; padding: 15px; border-radius: 12px; font-size: 32px; font-weight: 700; letter-spacing: 5px; color: #00e676; cursor: pointer; user-select: all; }
+            .error-box { background: rgba(255, 68, 68, 0.1); border: 1px solid rgba(255, 68, 68, 0.2); color: #ff5252; padding: 12px; border-radius: 10px; font-size: 13px; margin-top: 15px; display: none; }
+            .footer { margin-top: 25px; font-size: 11px; color: #556270; }
         </style>
     </head>
     <body>
-        <div class="container">
+        <div class="card">
             <h1>${BOT_NAME}</h1>
-            <p>Advanced WhatsApp Bot Pairing Portal</p>
-            ${content}
-            <div class="footer">© 2026 ${BOT_NAME} ❄️ • All rights reserved.</div>
+            <p>Enter your phone number to get the Pairing Code</p>
+            
+            <input type="text" id="phone" placeholder="94719845166" autocomplete="off">
+            <button id="btn" onclick="getCode()">Get Pair Code</button>
+            
+            <div id="error" class="error-box"></div>
+
+            <div id="resultBox">
+                <p style="color: #bbb; margin-bottom: 10px;">Click below to copy your code:</p>
+                <div class="code-display" id="codeText" onclick="copyCode()"></div>
+                <p style="font-size: 11px; color: #777; margin-top: 10px;">WhatsApp > Linked Devices > Link with Phone Number</p>
+            </div>
+
+            <div class="footer">© 2026 ${BOT_NAME} • Ultra Fast Pairing</div>
         </div>
+
         <script>
-            function submitPhone() {
-                const phone = document.getElementById('phoneInput').value;
-                if(phone) {
-                    window.location.href = '/pair?phone=' + phone.replace(/[^0-9]/g, '');
-                } else {
-                    alert('Please enter your WhatsApp number (ex: 94719845166)');
+            async function getCode() {
+                const phoneInput = document.getElementById('phone');
+                const btn = document.getElementById('btn');
+                const err = document.getElementById('error');
+                const resBox = document.getElementById('resultBox');
+                const codeText = document.getElementById('codeText');
+
+                let phone = phoneInput.value.replace(/[^0-9]/g, '');
+                if (!phone || phone.length < 10) {
+                    err.innerText = "Please enter a valid phone number with country code!";
+                    err.style.display = "block";
+                    return;
                 }
+
+                err.style.display = "none";
+                resBox.style.display = "none";
+                btn.disabled = true;
+                btn.innerText = "Generating Code...";
+
+                try {
+                    const response = await fetch('/api/pair?phone=' + phone);
+                    const data = await response.json();
+
+                    if (data.status && data.code) {
+                        codeText.innerText = data.code;
+                        resBox.style.display = "block";
+                        btn.style.display = "none";
+                        phoneInput.style.display = "none";
+                    } else {
+                        throw new Error(data.message || "Failed to generate code");
+                    }
+                } catch (e) {
+                    err.innerText = "⚠️ " + e.message;
+                    err.style.display = "block";
+                    btn.disabled = false;
+                    btn.innerText = "Try Again";
+                }
+            }
+
+            function copyCode() {
+                const text = document.getElementById('codeText').innerText;
+                navigator.clipboard.writeText(text);
+                alert("Code copied to clipboard: " + text);
             }
         </script>
     </body>
     </html>
-    `;
+    `);
+});
 
-    if (!phone) {
-        return res.send(renderUI(`
-            <input type="text" id="phoneInput" placeholder="94719845166" required>
-            <button onclick="submitPhone()">Generate Pair Code</button>
-        `));
-    }
+// JSON API Route (Never blocks the UI)
+app.get('/api/pair', async (req, res) => {
+    let phone = req.query.phone;
+    if (!phone) return res.json({ status: false, message: 'Phone number is required' });
+
+    phone = phone.replace(/[^0-9]/g, '');
+    const tempSession = `./temp_${Date.now()}`;
 
     try {
-        // Clear any half-baked session folder
-        if (fs.existsSync('./session')) fs.rmSync('./session', { recursive: true, force: true });
+        const { state, saveCreds } = await useMultiFileAuthState(tempSession);
 
-        const { state, saveCreds } = await useMultiFileAuthState('./session');
-        
-        // 🚀 Browser must be recognized properly by WhatsApp server on Linux/Render
         const sock = makeWASocket({
             auth: {
                 creds: state.creds,
@@ -205,71 +235,59 @@ app.get('/pair', async (req, res) => {
             },
             printQRInTerminal: false,
             logger: pino({ level: 'fatal' }),
-            browser: Browsers.ubuntu('Chrome')
+            browser: ['Ubuntu', 'Chrome', '20.0.04']
         });
 
-        sock.ev.on('creds.update', async () => {
-            await saveCreds();
-            await backupSessionToDB();
-        });
+        sock.ev.on('creds.update', saveCreds);
 
-        // Promise to wait strictly until WhatsApp Socket is Ready
-        const getCode = new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => {
-                reject(new Error("Timeout waiting for WhatsApp server"));
-            }, 20000); // 20s timeout
-
-            sock.ev.on('connection.update', async (update) => {
-                const { connection } = update;
+        // When connection succeeds after user enters code on WhatsApp
+        sock.ev.on('connection.update', async (update) => {
+            const { connection } = update;
+            if (connection === 'open') {
+                console.log(`✅ Device paired successfully! Syncing credentials...`);
+                await delay(2000);
+                if (fs.existsSync(`${tempSession}/creds.json`)) {
+                    const creds = JSON.parse(fs.readFileSync(`${tempSession}/creds.json`, 'utf-8'));
+                    await saveSession('main_session', creds);
+                    
+                    // Copy to permanent folder
+                    if (!fs.existsSync('./session')) fs.mkdirSync('./session', { recursive: true });
+                    fs.cpSync(tempSession, './session', { recursive: true });
+                }
                 
-                // If bot successfully connects later
-                if (connection === 'open') {
-                    console.log(`✅ ${BOT_NAME} Linked Successfully!`);
-                    await backupSessionToDB();
-                    setupBotHandlers(sock);
-                }
-
-                // When socket is ready to request code
-                if (!sock.authState.creds.registered) {
-                    try {
-                        // Request pair code when socket allows it
-                        let code = await sock.requestPairingCode(phone);
-                        code = code?.match(/.{1,4}/g)?.join('-') || code;
-                        clearTimeout(timeout);
-                        resolve(code);
-                    } catch (err) {
-                        // ignore until connection establishes
-                    }
-                }
-            });
+                // Cleanup temp
+                fs.rmSync(tempSession, { recursive: true, force: true });
+                registerCommands(sock);
+            }
         });
 
-        const pairingCode = await getCode;
+        // Crucial 2-second delay for WS handshake
+        await delay(2000);
 
-        res.send(renderUI(`
-            <p style="color: #c9d1d9;">Enter this code on WhatsApp: <br><small>Linked Devices -> Link with phone number</small></p>
-            <div class="code-box">${pairingCode}</div>
-            <button onclick="window.location.href='/pair'" style="background: rgba(255,255,255,0.1); color: #fff; border: 1px solid rgba(255,255,255,0.2);">Link Another Device</button>
-        `));
+        let code = await sock.requestPairingCode(phone);
+        code = code?.match(/.{1,4}/g)?.join('-') || code;
+
+        return res.json({ status: true, code });
 
     } catch (err) {
-        console.error("Pairing Error:", err.message);
-        res.send(renderUI(`
-            <input type="text" id="phoneInput" placeholder="94719845166" value="${phone}">
-            <button onclick="submitPhone()">Try Again</button>
-            <div class="error">⚠️ WhatsApp Server Busy or Blocked. Please wait 10 seconds and try again.</div>
-        `));
+        console.error('Pairing Error:', err);
+        if (fs.existsSync(tempSession)) fs.rmSync(tempSession, { recursive: true, force: true });
+        return res.json({ status: false, message: 'WhatsApp server busy. Wait 5s and try again.' });
     }
 });
 
-// App Startup
+// Application Starter
 app.listen(PORT, async () => {
-    console.log(`🌐 Server active on port ${PORT}`);
-    const hasDBSession = await restoreSessionFromDB();
-    if (hasDBSession || fs.existsSync('./session/creds.json')) {
-        console.log('🔑 Session found! Starting Bot...');
+    console.log(`🌐 Web Portal Running: http://localhost:${PORT}`);
+    
+    // Check MongoDB for saved session
+    const savedCreds = await getSession('main_session');
+    if (savedCreds) {
+        if (!fs.existsSync('./session')) fs.mkdirSync('./session', { recursive: true });
+        fs.writeFileSync('./session/creds.json', JSON.stringify(savedCreds, null, 2));
+        console.log('🔑 Existing session loaded from MongoDB. Starting Bot...');
         startBot();
     } else {
-        console.log('ℹ️ Waiting for pairing via /pair ...');
+        console.log('ℹ️ No active session. Waiting for pairing via web...');
     }
 });
