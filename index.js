@@ -24,7 +24,7 @@ async function startBot() {
     const sock = makeWASocket({
         auth: state,
         printQRInTerminal: false,
-        logger: pino({ level: 'silent' }),
+        logger: pino({ level: 'silent' }), // Log වහලා තියෙන්නේ, අවුලක් තියේනම් 'info' කරන්න පුළුවන්
         browser: Browsers.macOS('Desktop'),
     });
 
@@ -32,13 +32,26 @@ async function startBot() {
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect } = update;
+        
         if (connection === 'close') {
-            const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect) {
-                console.log('🔄 Reconnecting...');
-                startBot();
+            const statusCode = lastDisconnect.error?.output?.statusCode;
+            
+            // Logged out, Unauthorized or bad session -> Clear session folder
+            if (statusCode === DisconnectReason.loggedOut || statusCode === 401 || statusCode === 403) {
+                console.log('❌ Session Invalid or Logged Out! Clearing session...');
+                if (fs.existsSync('./session')) {
+                    fs.rmSync('./session', { recursive: true, force: true });
+                }
+                console.log('🔄 Restarting Bot from scratch...');
+                setTimeout(startBot, 3000);
+            } 
+            // Other disconnect reasons -> Reconnect with a delay
+            else {
+                console.log(`⚠️ Connection Closed (Reason: ${statusCode}). Reconnecting in 3s...`);
+                setTimeout(startBot, 3000); // 3-second delay prevents infinite fast loops
             }
-        } else if (connection === 'open') {
+        } 
+        else if (connection === 'open') {
             console.log(`✅ ${BOT_NAME} is Online & Fast!`);
             try {
                 await sock.sendMessage(devs[0], { text: `🚀 *${BOT_NAME}* Successfully Started!\n\nBot is running at Super Speed ⚡` });
@@ -92,12 +105,10 @@ async function startBot() {
     // 🌐 Web Server Routes
     // ==========================================
     
-    // 1. Root Route - Redirects directly to the pairing page
     app.get('/', (req, res) => {
         res.redirect('/pair');
     });
 
-    // 2. Premium Pairing Site Route
     app.get('/pair', async (req, res) => {
         let phone = req.query.phone;
         
@@ -111,69 +122,15 @@ async function startBot() {
             <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap" rel="stylesheet">
             <style>
                 * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Poppins', sans-serif; }
-                body { 
-                    background: linear-gradient(135deg, #1e1e1e, #0d0d0d); 
-                    color: #fff; 
-                    display: flex; 
-                    justify-content: center; 
-                    align-items: center; 
-                    min-height: 100vh; 
-                    padding: 20px;
-                }
-                .container {
-                    background: rgba(255, 255, 255, 0.05);
-                    backdrop-filter: blur(15px);
-                    border: 1px solid rgba(255, 255, 255, 0.1);
-                    border-radius: 20px;
-                    padding: 40px;
-                    max-width: 450px;
-                    width: 100%;
-                    text-align: center;
-                    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-                    animation: fadeIn 0.8s ease-in-out;
-                }
+                body { background: linear-gradient(135deg, #1e1e1e, #0d0d0d); color: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }
+                .container { background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(15px); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 20px; padding: 40px; max-width: 450px; width: 100%; text-align: center; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5); animation: fadeIn 0.8s ease-in-out; }
                 h1 { font-size: 26px; margin-bottom: 10px; color: #00e676; font-weight: 700; }
                 p { font-size: 14px; color: #bbb; margin-bottom: 25px; line-height: 1.5; }
-                input[type="text"] {
-                    width: 100%;
-                    padding: 15px;
-                    border: none;
-                    border-radius: 10px;
-                    background: rgba(255, 255, 255, 0.1);
-                    color: #fff;
-                    font-size: 16px;
-                    margin-bottom: 15px;
-                    outline: none;
-                    text-align: center;
-                    transition: all 0.3s;
-                }
+                input[type="text"] { width: 100%; padding: 15px; border: none; border-radius: 10px; background: rgba(255, 255, 255, 0.1); color: #fff; font-size: 16px; margin-bottom: 15px; outline: none; text-align: center; transition: all 0.3s; }
                 input[type="text"]:focus { background: rgba(255, 255, 255, 0.2); box-shadow: 0 0 15px rgba(0, 230, 118, 0.3); }
-                button {
-                    width: 100%;
-                    padding: 15px;
-                    border: none;
-                    border-radius: 10px;
-                    background: #00e676;
-                    color: #111;
-                    font-size: 16px;
-                    font-weight: 600;
-                    cursor: pointer;
-                    transition: 0.3s;
-                }
+                button { width: 100%; padding: 15px; border: none; border-radius: 10px; background: #00e676; color: #111; font-size: 16px; font-weight: 600; cursor: pointer; transition: 0.3s; }
                 button:hover { background: #00c853; transform: translateY(-2px); box-shadow: 0 5px 15px rgba(0, 230, 118, 0.4); }
-                .code-box {
-                    background: rgba(0, 0, 0, 0.3);
-                    padding: 20px;
-                    border-radius: 12px;
-                    font-size: 36px;
-                    font-weight: 700;
-                    letter-spacing: 6px;
-                    color: #00e676;
-                    margin-top: 10px;
-                    margin-bottom: 20px;
-                    border: 2px dashed #00e676;
-                    display: inline-block;
-                }
+                .code-box { background: rgba(0, 0, 0, 0.3); padding: 20px; border-radius: 12px; font-size: 36px; font-weight: 700; letter-spacing: 6px; color: #00e676; margin-top: 10px; margin-bottom: 20px; border: 2px dashed #00e676; display: inline-block; }
                 .error { color: #ff4d4d; font-size: 14px; margin-top: 15px; background: rgba(255, 77, 77, 0.1); padding: 10px; border-radius: 8px;}
                 .footer { margin-top: 30px; font-size: 12px; color: #666; }
                 @keyframes fadeIn { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
@@ -190,7 +147,6 @@ async function startBot() {
                 function submitPhone() {
                     const phone = document.getElementById('phoneInput').value;
                     if(phone) {
-                        // Redirect with sanitized phone number
                         window.location.href = '/pair?phone=' + phone.replace(/[^0-9]/g, '');
                     } else {
                         alert('Please enter your WhatsApp number (ex: 94719845166).');
@@ -201,7 +157,6 @@ async function startBot() {
         </html>
         `;
 
-        // If no phone is provided, show the input form
         if (!phone) {
             return res.send(htmlTemplate(`
                 <input type="text" id="phoneInput" placeholder="Enter number with country code (ex: 947...)" required>
@@ -209,7 +164,6 @@ async function startBot() {
             `));
         }
         
-        // If phone is provided, generate and show the code
         try {
             const code = await sock.requestPairingCode(phone);
             res.send(htmlTemplate(`
@@ -234,6 +188,5 @@ app.listen(PORT, () => {
     console.log(`🌐 Site is Running: http://localhost:${PORT}`);
     console.log(`=================================`);
     
-    // Start Bot after Server is up
     startBot();
 });
