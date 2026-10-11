@@ -2,30 +2,42 @@ const mongoose = require('mongoose');
 
 const sessionSchema = new mongoose.Schema({
     id: { type: String, required: true, unique: true },
-    data: { type: String, required: true }
-});
+    data: { type: Object, required: true }
+}, { timestamps: true });
 
-const Session = mongoose.model('Session', sessionSchema);
+const Session = mongoose.models.Session || mongoose.model('Session', sessionSchema);
 
-async function useMongoDBAuthState(collectionName) {
-    const writeData = async (data, id) => {
-        await Session.updateOne({ id }, { data: JSON.stringify(data, null, 2) }, { upsert: true });
-    };
-    
-    const readData = async (id) => {
-        const found = await Session.findOne({ id });
-        return found ? JSON.parse(found.data) : null;
-    };
-    
-    const removeData = async (id) => {
-        await Session.deleteOne({ id });
-    };
-
-    // Baileys requires state and saveCreds functions. 
-    // (For a production app, use standard Baileys MongoDB adapters, 
-    // but this sets the basic logic for creds storage).
-    
-    return { writeData, readData, removeData };
+async function saveSession(sessionId, credsData) {
+    try {
+        await Session.findOneAndUpdate(
+            { id: sessionId },
+            { data: credsData },
+            { upsert: true, new: true }
+        );
+        return true;
+    } catch (e) {
+        console.error('❌ MongoDB Save Error:', e.message);
+        return false;
+    }
 }
 
-module.exports = { useMongoDBAuthState };
+async function getSession(sessionId) {
+    try {
+        const found = await Session.findOne({ id: sessionId });
+        return found ? found.data : null;
+    } catch (e) {
+        console.error('❌ MongoDB Read Error:', e.message);
+        return null;
+    }
+}
+
+async function deleteSession(sessionId) {
+    try {
+        await Session.deleteOne({ id: sessionId });
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
+module.exports = { saveSession, getSession, deleteSession };
