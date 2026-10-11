@@ -18,14 +18,6 @@ const { useMongoAuthState, flushWrites } = require("./auth");
 const CONFIG = require("./config");
 const settings = require("./settings");
 
-// Noise Logs අඩු කිරීම
-const _info = console.info;
-console.info = (...a) => {
-  if (typeof a[0] === "string" && a[0].startsWith("Closing session")) return;
-  _info(...a);
-};
-
-// Process Crash Guard
 process.on("uncaughtException", (e) => console.error("[uncaughtException]", e?.message || e));
 process.on("unhandledRejection", (e) => console.error("[unhandledRejection]", e?.message || e));
 
@@ -37,11 +29,10 @@ const commands = new Map();
 const aliases = new Map();
 const messageStore = new Map();
 const processed = new Set();
+const processedStatuses = new Set();
 const botSent = new Set();
 
-// Status caches
 global.statusCache = global.statusCache || new Map();
-global.processedStatusRequests = global.processedStatusRequests || new Set();
 
 let sock = null;
 let creating = null;
@@ -50,11 +41,14 @@ let retryCount = 0;
 let waVersion = null;
 let connState = "idle";
 
-function makeCache(max = 5000) {
+function makeCache(max = 3000) {
   const m = new Map();
   return {
     get: (k) => m.get(k),
-    set: (k, v) => { m.set(k, v); if (m.size > max) m.delete(m.keys().next().value); },
+    set: (k, v) => {
+      m.set(k, v);
+      if (m.size > max) m.delete(m.keys().next().value);
+    },
     del: (k) => m.delete(k),
     flushAll: () => m.clear()
   };
@@ -67,12 +61,12 @@ function markSent(sent) {
   const id = sent?.key?.id;
   if (!id) return;
   botSent.add(id);
-  if (botSent.size > 2000) botSent.delete(botSent.values().next().value);
+  if (botSent.size > 1500) botSent.delete(botSent.values().next().value);
   if (sent.message) messageStore.set(id, sent.message);
 }
 
 // ==========================================
-// 1. Plugins Auto-Loader & Watcher
+// 1. Plugins Auto-Loader
 // ==========================================
 function loadPlugins() {
   commands.clear();
@@ -90,9 +84,6 @@ function loadPlugins() {
         commands.set(cmd.name.toLowerCase(), cmd);
         (cmd.aliases || []).forEach((a) => aliases.set(a.toLowerCase(), cmd));
       }
-      if (typeof cmd.initDaemon === "function" && sock) {
-        try { cmd.initDaemon(sock); } catch (e) {}
-      }
     } catch (err) {
       console.error(`[Plugin Load Error] ${file}:`, err.message);
     }
@@ -100,16 +91,8 @@ function loadPlugins() {
   console.log(`⚡ [CORE] Loaded ${commands.size} commands cleanly.`);
 }
 
-try {
-  fs.watch(path.join(__dirname, "plugins"), (eventType, filename) => {
-    if (filename && filename.endsWith(".js")) {
-      loadPlugins();
-    }
-  });
-} catch (e) {}
-
 // ==========================================
-// 2. Socket Manager & Reconnect Lifecycle
+// 2. Socket Manager & Lifecycle
 // ==========================================
 function killSocket() {
   if (!sock) return;
@@ -120,21 +103,20 @@ function killSocket() {
     old.ev.removeAllListeners("messages.upsert");
     old.ev.removeAllListeners("creds.update");
     old.ev.removeAllListeners("call");
+    old.end(undefined);
   } catch (e) {}
-  try { old.end(undefined); } catch (e) {}
 }
 
 function scheduleReconnect(ms) {
   if (reconnectTimer) return;
   const wait = ms ?? Math.min(2000 * 2 ** retryCount, 60000);
   retryCount++;
-  console.log(`🔁 Reconnecting in ${Math.round(wait / 1000)}s ...`);
+  console.log(`🔁 Reconnecting in ${Math.round(wait / 1000)}s...`);
   reconnectTimer = setTimeout(async () => {
     reconnectTimer = null;
     try {
       await createSocket();
     } catch (e) {
-      console.error("Reconnect fail:", e.message);
       scheduleReconnect();
     }
   }, wait);
@@ -153,7 +135,7 @@ async function _createSocket() {
 
   if (!waVersion) {
     try {
-      const v = await Promise.race([fetchLatestBaileysVersion(), delay(8000).then(() => null)]);
+      const v = await Promise.race([fetchLatestBaileysVersion(), delay(5000).then(() => null)]);
       if (v?.version) waVersion = v.version;
     } catch (e) {}
   }
@@ -170,9 +152,7 @@ async function _createSocket() {
     defaultQueryTimeoutMs: 60000,
     keepAliveIntervalMs: 25000,
     connectTimeoutMs: 60000,
-    markOnlineOnConnect: false,
-    syncFullHistory: true, // Status Broadcasts Socket එකට ලැබීමට අනිවාර්යයි
-    generateHighQualityLinkPreview: false,
+    syncFullHistory: true,
     msgRetryCounterCache,
     getMessage: async (key) => messageStore.get(key.id) || undefined
   });
@@ -186,118 +166,84 @@ async function _createSocket() {
       connState = "open";
       retryCount = 0;
       console.log(`⚡ [CONNECTED] ${CONFIG.BOT_NAME} Online & Ready 🟢`);
-
-      commands.forEach((cmd) => {
-        if (typeof cmd.initDaemon === "function") {
-          try { cmd.initDaemon(s); } catch (e) {}
-        }
-      });
     } else if (connection === "close") {
       connState = "closed";
       const reason = lastDisconnect?.error?.output?.statusCode;
-      console.log("🔌 Connection closed, reason:", reason);
-
       if (reason === DisconnectReason.loggedOut) {
-        console.log("❌ Logged out. Session cleared.");
         killSocket();
-        try { await clearSession(); } catch (e) {}
+        await clearSession().catch(() => {});
         messageStore.clear();
         return;
       }
-      if (reason === DisconnectReason.restartRequired) return scheduleReconnect(500);
-      if (reason === DisconnectReason.connectionReplaced) {
-        return scheduleReconnect(20000);
-      }
-      scheduleReconnect();
+      scheduleReconnect(reason === DisconnectReason.restartRequired ? 500 : undefined);
     }
   });
 
-  // ==========================================
-  // DIRECT 100% STATUS ENGINE & RECEIPT SYSTEM
-  // ==========================================
+  // Messages & Status Handler
   s.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
+
     for (const msg of messages) {
       if (!msg?.key) continue;
 
-      // 1. STATUS BROADCAST (RAW STANZA SEEN & DIRECT REACT)
+      // Status Processing
       if (msg.key.remoteJid === "status@broadcast") {
         const participant = msg.key.participant || msg.participant;
         const statusId = msg.key.id;
 
-        // තමන්ගේම status නම් skip කිරීම
         if (msg.key.fromMe || !participant || !statusId) continue;
 
-        // Status Saver එක සඳහා cache කිරීම
+        const uniqueKey = `${participant}:${statusId}`;
+        if (processedStatuses.has(uniqueKey)) continue;
+        processedStatuses.add(uniqueKey);
+        if (processedStatuses.size > 2000) processedStatuses.delete(processedStatuses.values().next().value);
+
         if (msg.message) {
           global.statusCache.set(statusId, msg);
-          messageStore.set(statusId, msg.message);
           setTimeout(() => global.statusCache.delete(statusId), 12 * 60 * 60 * 1000);
         }
 
-        try {
-          const botPhone = (s.user?.id || CONFIG.OWNER_NUMBER).split(":")[0].replace(/[^0-9]/g, "");
-          const st = global.statusSettings?.get(botPhone) || {
-            seen: settings?.get ? (settings.get("autostatusseen") ?? true) : true,
-            react: settings?.get ? (settings.get("autostatusreact") ?? true) : true,
-            emoji: (settings?.get ? settings.get("statusEmoji") : null) || "😼"
-          };
+        const isSeen = settings?.get ? settings.get("autostatusseen") !== false : true;
+        const isReact = settings?.get ? settings.get("autostatusreact") !== false : true;
+        const emoji = (settings?.get ? settings.get("statusEmoji") : null) || "🩷";
 
-          // A. DIRECT READ RECEIPT (Raw Stanza Seen Method)
-          if (st.seen) {
+        try {
+          if (isSeen) {
             await s.readMessages([msg.key]).catch(() => {});
-            if (typeof s.sendReceipt === "function") {
-              await s.sendReceipt("status@broadcast", participant, [statusId], "read").catch(() => {});
-            }
-            console.log(`👁️ [STATUS SEEN OK] -> ${participant.split("@")[0]}`);
           }
 
-          // B. DIRECT AUTO REACT
-          if (st.react && st.emoji) {
-            await delay(400); // Decryption stability delay
+          if (isReact && emoji) {
+            await delay(400);
             await s.sendMessage(
               "status@broadcast",
               {
                 react: {
-                  text: st.emoji,
+                  text: emoji,
                   key: {
                     remoteJid: "status@broadcast",
                     id: statusId,
-                    participant: participant,
+                    participant,
                     fromMe: false
                   }
                 }
               },
               { statusJidList: [participant] }
             );
-            console.log(`💖 [STATUS REACT OK] -> ${st.emoji} to ${participant.split("@")[0]}`);
           }
-        } catch (statusErr) {
-          console.error("Status Action Failed:", statusErr.message);
-        }
-
-        // Plugin Hook for Status Updates
-        commands.forEach((cmd) => {
-          if (typeof cmd.onStatus === "function") {
-            try { cmd.onStatus({ sock: s, msg, settings }); } catch (e) {}
-          }
-        });
+        } catch (err) {}
         continue;
       }
 
-      // 2. AUTO READ CHATS
-      try {
-        if (settings?.get && settings.get("autoread") && !msg.key?.fromMe) {
-          s.readMessages([msg.key]).catch(() => {});
-        }
-      } catch (e) {}
+      // Auto Read PM/Group Chats
+      if (settings?.get && settings.get("autoread") && !msg.key.fromMe) {
+        s.readMessages([msg.key]).catch(() => {});
+      }
 
-      // 3. REGULAR MESSAGE ROUTING
       handleMessage(s, msg).catch((e) => console.error("Handler error:", e.message));
     }
   });
 
-  // Anti Call System
+  // Anti Call Guard
   s.ev.on("call", async (calls) => {
     if (!settings?.get || !settings.get("anticall")) return;
     for (const c of calls) {
@@ -326,16 +272,13 @@ app.get("/", (req, res) => {
       <title>${CONFIG.BOT_NAME}</title>
       <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; background: #080c10; color: #fff; margin: 0; padding: 20px; box-sizing: border-box; }
-        .box { background: #0f1622; padding: 2.5rem 2rem; border-radius: 20px; width: 100%; max-width: 340px; text-align: center; border: 1px solid #1f293d; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
-        h1 { margin: 0 0 8px 0; color: #58a6ff; font-size: 1.6rem; }
+        .box { background: #0f1622; padding: 2rem; border-radius: 16px; width: 100%; max-width: 340px; text-align: center; border: 1px solid #1f293d; }
+        h1 { margin: 0 0 8px 0; color: #58a6ff; font-size: 1.5rem; }
         p { color: #8b949e; font-size: 0.85rem; margin-bottom: 20px; }
-        input { width: 100%; padding: 14px; margin-bottom: 12px; border: 1px solid #30363d; border-radius: 10px; background: #080c10; color: #fff; box-sizing: border-box; font-size: 1rem; outline: none; }
-        input:focus { border-color: #58a6ff; }
-        button { width: 100%; padding: 13px; background: #238636; color: #fff; border: none; border-radius: 10px; font-weight: bold; cursor: pointer; transition: 0.2s; font-size: 1rem; margin-bottom: 10px; }
-        button:hover { background: #2ea043; }
+        input { width: 100%; padding: 12px; margin-bottom: 12px; border: 1px solid #30363d; border-radius: 8px; background: #080c10; color: #fff; box-sizing: border-box; font-size: 1rem; outline: none; }
+        button { width: 100%; padding: 12px; background: #238636; color: #fff; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; font-size: 1rem; margin-bottom: 8px; }
         .reset-btn { background: #da3633; }
-        .reset-btn:hover { background: #f85149; }
-        #code { margin-top: 15px; font-size: 1.5rem; font-weight: bold; color: #38bdf8; letter-spacing: 4px; font-family: monospace; word-break: break-all; min-height: 35px; }
+        #code { margin-top: 15px; font-size: 1.4rem; font-weight: bold; color: #38bdf8; letter-spacing: 3px; font-family: monospace; min-height: 30px; }
       </style>
     </head>
     <body>
@@ -363,7 +306,7 @@ app.get("/", (req, res) => {
           finally { btn.disabled = false; }
         }
         async function resetSession() {
-          if (!confirm('Clear session and generate new keys?')) return;
+          if (!confirm('Clear session?')) return;
           const display = document.getElementById('code');
           display.innerText = 'Clearing...';
           try {
@@ -379,7 +322,6 @@ app.get("/", (req, res) => {
 });
 
 app.get("/health", (req, res) => res.json({ ok: true, state: connState }));
-app.get("/status", (req, res) => res.json({ state: connState, commands: commands.size }));
 
 app.get("/reset-session", async (req, res) => {
   try {
@@ -419,7 +361,7 @@ app.get("/get-code", async (req, res) => {
 });
 
 // ==========================================
-// 4. Ultra-Speed Message & Event Router
+// 4. Message Router
 // ==========================================
 async function handleMessage(waSock, msg) {
   if (!msg?.message || !msg?.key) return;
@@ -429,19 +371,14 @@ async function handleMessage(waSock, msg) {
   if (id) {
     messageStore.set(id, msg.message);
     if (messageStore.size > 2000) messageStore.delete(messageStore.keys().next().value);
-  }
-
-  const from = msg.key.remoteJid;
-  if (!from || from === "status@broadcast") return;
-
-  const ts = Number(msg.messageTimestamp) || 0;
-  if (ts && Date.now() / 1000 - ts > 60) return;
-
-  if (id) {
     if (processed.has(id)) return;
     processed.add(id);
     if (processed.size > 2000) processed.delete(processed.values().next().value);
   }
+
+  const from = msg.key.remoteJid;
+  const ts = Number(msg.messageTimestamp) || 0;
+  if (ts && Date.now() / 1000 - ts > 60) return;
 
   const mType = Object.keys(msg.message)[0];
   const body = (
@@ -451,21 +388,18 @@ async function handleMessage(waSock, msg) {
     ""
   ).trim();
 
-  // Owner Validation
   const ownerClean = idOf(CONFIG.OWNER_NUMBER);
   const myNumber = idOf(waSock.user?.id) || ownerClean;
   const myLid = idOf(waSock.user?.lid);
   const sender = msg.key.fromMe ? myNumber : idOf(msg.key.participant || from);
   const isOwner = !!(msg.key.fromMe || sender === ownerClean || sender === myNumber || (myLid && sender === myLid));
-  const isPublic = (settings?.get ? (settings.get("mode") || "public") : "public") === "public";
+  const isPublic = (settings?.get ? settings.get("mode") || "public" : "public") === "public";
 
-  // Destination Resolution
   const target = idOf(from);
   const isSelfChat = !from.endsWith("@g.us") &&
     (target === ownerClean || target === myNumber || (myLid && target === myLid));
   const jid = isSelfChat && waSock.user?.id ? jidNormalizedUser(waSock.user.id) : from;
 
-  // Safe Universal Senders
   const send = async (content, opts = {}) => {
     try {
       const sent = await waSock.sendMessage(jid, content, opts);
@@ -476,56 +410,19 @@ async function handleMessage(waSock, msg) {
     }
   };
 
-  const reply = (text) => {
-    if (isSelfChat) {
-      return send({ text: String(text) });
-    }
-    return send({ text: String(text) }, { quoted: msg });
-  };
-
-  const sendVoice = (audioBuffer) => {
-    return send({
-      audio: audioBuffer,
-      mimetype: "audio/mp4",
-      ptt: true
-    }, isSelfChat ? {} : { quoted: msg });
-  };
-
-  const react = async (emoji) => {
-    if (isSelfChat) return;
-    return waSock.sendMessage(from, { react: { text: emoji, key: msg.key } }).catch(() => {});
-  };
-
-  // Interactive Reply Interceptor (Status Saver Plugins)
-  const quotedStanzaId = msg.message.extendedTextMessage?.contextInfo?.stanzaId;
-  for (const cmd of commands.values()) {
-    if (typeof cmd.onReply === "function") {
-      try {
-        const handled = await cmd.onReply({
-          sock: waSock, msg, from, jid, body, quotedStanzaId, reply, send, settings, isOwner
-        });
-        if (handled) return;
-      } catch (e) {}
-    }
-  }
+  const reply = (text) => isSelfChat ? send({ text: String(text) }) : send({ text: String(text) }, { quoted: msg });
+  const sendVoice = (audioBuffer) => send({ audio: audioBuffer, mimetype: "audio/mp4", ptt: true }, isSelfChat ? {} : { quoted: msg });
+  const react = async (emoji) => !isSelfChat && waSock.sendMessage(from, { react: { text: emoji, key: msg.key } }).catch(() => {});
 
   if (!isOwner && !isPublic) return;
 
-  // Prefix handling
   const prefix = (settings?.get ? settings.get("prefix") : null) || CONFIG.PREFIX || ",";
-  if (isOwner && body.toLowerCase() === "prefix") {
-    await reply(`🔰 Current prefix: *${prefix}*`);
-    return;
-  }
   if (!body.startsWith(prefix)) return;
 
   const [trigger, ...args] = body.slice(prefix.length).trim().split(/\s+/);
   const cmdName = (trigger || "").toLowerCase();
   const command = commands.get(cmdName) || aliases.get(cmdName);
   if (!command) return;
-
-  const typing = settings?.get ? settings.get("autotyping") : false;
-  if (typing) waSock.sendPresenceUpdate("composing", jid).catch(() => {});
 
   try {
     await command.execute({
@@ -550,13 +447,11 @@ async function handleMessage(waSock, msg) {
     });
   } catch (err) {
     console.error(`Command [${cmdName}] Error:`, err.message);
-  } finally {
-    if (typing) waSock.sendPresenceUpdate("paused", jid).catch(() => {});
   }
 }
 
 // ==========================================
-// 5. Bot Initialization & Keep-Alive
+// 5. App Startup & Clean Shutdown
 // ==========================================
 async function startBot() {
   try {
@@ -570,36 +465,19 @@ async function startBot() {
       console.log("ℹ️ Bot not paired. Please use the Web portal to pair.");
     }
   } catch (e) {
-    console.error("StartBot error:", e.message);
     scheduleReconnect(5000);
   }
 }
 
-let wasOnline = false;
-setInterval(() => {
-  if (!sock || connState !== "open") return;
-  const want = settings?.get ? !!settings.get("alwaysonline") : false;
-  if (want) sock.sendPresenceUpdate("available").catch(() => {});
-  else if (wasOnline) sock.sendPresenceUpdate("unavailable").catch(() => {});
-  wasOnline = want;
-}, 20000);
-
-let shuttingDown = false;
-async function shutdown(sig) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  console.log(`🛑 ${sig} - Flushing session writes before shutdown...`);
-  try {
-    if (reconnectTimer) clearTimeout(reconnectTimer);
-    killSocket();
-    if (typeof flushWrites === "function") {
-      await Promise.race([flushWrites(), delay(8000)]);
-    }
-  } catch (e) {}
+async function shutdown() {
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  killSocket();
+  if (typeof flushWrites === "function") await Promise.race([flushWrites(), delay(5000)]);
   process.exit(0);
 }
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
+
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
 
 const publicUrl = process.env.RENDER_EXTERNAL_URL || process.env.APP_URL;
 if (publicUrl) {
