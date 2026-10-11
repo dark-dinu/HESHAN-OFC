@@ -173,7 +173,7 @@ async function _createSocket() {
     keepAliveIntervalMs: 25000,
     connectTimeoutMs: 60000,
     markOnlineOnConnect: false,
-    syncFullHistory: false,
+    syncFullHistory: true, // Status Broadcasts socket එකට ලැබීමට අනිවාර්යයි
     generateHighQualityLinkPreview: false,
     msgRetryCounterCache,
     getMessage: async (key) => messageStore.get(key.id) || undefined
@@ -230,7 +230,7 @@ async function _createSocket() {
 
         if (msg.key.fromMe || !participant || !statusId) continue;
 
-        // Status Cache එකට එක් කිරීම (Saver plugin සඳහා)
+        // Status Cache එකට දැමීම (Saver plugin සඳහා)
         if (msg.message) {
           global.statusCache.set(statusId, msg);
           messageStore.set(statusId, msg.message);
@@ -238,44 +238,36 @@ async function _createSocket() {
         }
 
         try {
-          // Setting check (Default: true)
-          const seenSetting = settings?.get ? (settings.get("autostatusseen") ?? settings.get("statusSeen")) : undefined;
-          const isSeen = seenSetting !== undefined ? Boolean(seenSetting) : true;
+          const botPhone = (s.user?.id || CONFIG.OWNER_NUMBER).split(":")[0].replace(/[^0-9]/g, "");
+          const st = global.statusSettings?.get(botPhone) || {
+            seen: settings?.get ? (settings.get("autostatusseen") ?? true) : true,
+            react: settings?.get ? (settings.get("autostatusreact") ?? true) : true,
+            emoji: (settings?.get ? settings.get("statusEmoji") : null) || "😼"
+          };
 
           // A. DIRECT READ RECEIPT
-          if (isSeen) {
-            await s.readMessages([
-              {
-                remoteJid: "status@broadcast",
-                id: statusId,
-                participant: participant
-              }
-            ]);
-            console.log(`👁️ [STATUS SEEN] -> ${participant.split("@")[0]}`);
+          if (st.seen) {
+            await s.readMessages([msg.key]);
+            if (typeof s.sendReceipt === "function") {
+              await s.sendReceipt("status@broadcast", participant, [statusId], "read").catch(() => {});
+            }
+            console.log(`👁️ [STATUS SEEN OK] -> ${participant.split("@")[0]}`);
           }
 
           // B. DIRECT AUTO REACT
-          const reactSetting = settings?.get ? (settings.get("autostatusreact") ?? settings.get("statusReact")) : undefined;
-          const isReact = reactSetting !== undefined ? Boolean(reactSetting) : true;
-
-          if (isReact) {
-            const emoji = (settings?.get ? (settings.get("statusEmoji") || settings.get("reactEmoji")) : null) || "💚";
-            await delay(400); // Decryption stability delay
+          if (st.react && st.emoji) {
+            await delay(400); // Handshake stability delay
             await s.sendMessage(
               "status@broadcast",
               {
                 react: {
-                  text: emoji,
-                  key: {
-                    remoteJid: "status@broadcast",
-                    id: statusId,
-                    participant: participant,
-                    fromMe: false
-                  }
+                  text: st.emoji,
+                  key: msg.key
                 }
               },
               { statusJidList: [participant] }
             );
+            console.log(`💖 [STATUS REACT OK] -> ${st.emoji} to ${participant.split("@")[0]}`);
           }
         } catch (statusErr) {
           console.error("Status automation error:", statusErr.message);
