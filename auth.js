@@ -1,43 +1,137 @@
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
-const sessionSchema = new mongoose.Schema({
-    id: { type: String, required: true, unique: true },
-    data: { type: Object, required: true }
-}, { timestamps: true });
+const sessionSchema = new mongoose.Schema(
+    {
+        id: {
+            type: String,
+            required: true,
+            unique: true,
+            index: true
+        },
+        data: {
+            type: mongoose.Schema.Types.Mixed,
+            required: true
+        }
+    },
+    {
+        timestamps: true,
+        minimize: false
+    }
+);
 
-const Session = mongoose.models.Session || mongoose.model('Session', sessionSchema);
+const Session =
+    mongoose.models.Session ||
+    mongoose.model("Session", sessionSchema);
+
+async function waitForMongo() {
+    if (mongoose.connection.readyState === 1) {
+        return true;
+    }
+
+    if (mongoose.connection.readyState === 2) {
+        await mongoose.connection.asPromise();
+        return true;
+    }
+
+    throw new Error(
+        "MongoDB is not connected. Check your MONGO_URI or MONGODB_URL."
+    );
+}
 
 async function saveSession(sessionId, credsData) {
     try {
+        if (!sessionId) {
+            throw new Error("Session ID is missing.");
+        }
+
+        if (
+            credsData === undefined ||
+            credsData === null
+        ) {
+            throw new Error("Session data is empty.");
+        }
+
+        await waitForMongo();
+
         await Session.findOneAndUpdate(
-            { id: sessionId },
-            { data: credsData },
-            { upsert: true, new: true }
+            { id: String(sessionId) },
+            {
+                $set: {
+                    data: credsData
+                }
+            },
+            {
+                upsert: true,
+                new: true,
+                runValidators: true,
+                setDefaultsOnInsert: true
+            }
         );
+
         return true;
-    } catch (e) {
-        console.error('❌ MongoDB Save Error:', e.message);
+    } catch (error) {
+        console.error(
+            "[SESSION SAVE ERROR]",
+            error.message
+        );
+
         return false;
     }
 }
 
 async function getSession(sessionId) {
     try {
-        const found = await Session.findOne({ id: sessionId });
-        return found ? found.data : null;
-    } catch (e) {
-        console.error('❌ MongoDB Read Error:', e.message);
+        if (!sessionId) {
+            throw new Error("Session ID is missing.");
+        }
+
+        await waitForMongo();
+
+        const session = await Session.findOne({
+            id: String(sessionId)
+        }).lean();
+
+        if (!session) {
+            return null;
+        }
+
+        return session.data ?? null;
+    } catch (error) {
+        console.error(
+            "[SESSION READ ERROR]",
+            error.message
+        );
+
         return null;
     }
 }
 
 async function deleteSession(sessionId) {
     try {
-        await Session.deleteOne({ id: sessionId });
+        if (!sessionId) {
+            throw new Error("Session ID is missing.");
+        }
+
+        await waitForMongo();
+
+        await Session.deleteOne({
+            id: String(sessionId)
+        });
+
         return true;
-    } catch (e) {
+    } catch (error) {
+        console.error(
+            "[SESSION DELETE ERROR]",
+            error.message
+        );
+
         return false;
     }
 }
 
-module.exports = { saveSession, getSession, deleteSession };
+module.exports = {
+    saveSession,
+    getSession,
+    deleteSession,
+    Session
+};
