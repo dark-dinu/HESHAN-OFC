@@ -1,12 +1,11 @@
 const { downloadMediaMessage } = require("@whiskeysockets/baileys");
 
-// Status Cache සහ Duplicate Request Lock Tracker
 global.statusCache = global.statusCache || new Map();
 global.processedStatusRequests = global.processedStatusRequests || new Set();
 
 const BOT_BOOT_TIME = Math.floor(Date.now() / 1000);
 
-// Status Saver Trigger Words List
+// Status Saver Trigger Words
 const TRIGGERS = new Set([
   "oni", "one", "denna", "ewanna", "save", "send", "dapan", "ewapan", "dako", "dipan",
   "ඕනි", "ඔනි", "එවන්න", "දාන්න", "දෙන්න", "දාන්නකො", "එවන්නකො"
@@ -68,33 +67,39 @@ module.exports = {
   aliases: ["stat", "savestatus"],
   description: "Status Automation Engine & Interactive Downloader",
 
-  // 2. Background Auto Seen & Auto React Listener (index.js core එකෙන් call වේ)
+  // 2. Ultra-Reliable Status Auto Seen & Auto React
   async onStatus({ sock, msg, settings }) {
     try {
       const statusId = msg.key?.id;
       const participant = msg.key?.participant || msg.participant;
       if (!statusId) return;
 
-      // Status එක memory cache එකට දමා පැය 12කින් auto-clean කිරීම
+      // Cache memory saving
       global.statusCache.set(statusId, msg);
       setTimeout(() => global.statusCache.delete(statusId), 12 * 60 * 60 * 1000);
 
-      if (msg.key.fromMe || !participant) return;
+      // තමන් දාන status skip කිරීම
+      if (msg.key.fromMe) return;
 
-      // A. Auto Seen (Settings වලින් check කරයි)
-      const isSeenOn = settings?.get("autostatusseen") ?? settings?.get("statusSeen") ?? true;
+      // A. 100% Guaranteed Auto Seen (Default: Enabled)
+      const settingSeen = settings?.get ? (settings.get("autostatusseen") ?? settings.get("statusSeen")) : undefined;
+      const isSeenOn = settingSeen !== undefined ? Boolean(settingSeen) : true;
+
       if (isSeenOn) {
+        // Direct Baileys Status Receipt Packet
         await sock.readMessages([{
           remoteJid: "status@broadcast",
           id: statusId,
-          participant
+          participant: participant || msg.key.remoteJid
         }]).catch(() => {});
       }
 
-      // B. Auto React (Settings වලින් check කරයි)
-      const isReactOn = settings?.get("autostatusreact") ?? settings?.get("statusReact") ?? false;
-      if (isReactOn) {
-        const emoji = settings?.get("statusEmoji") || settings?.get("reactEmoji") || "💚";
+      // B. Auto React (Default: Enabled with ❤️)
+      const settingReact = settings?.get ? (settings.get("autostatusreact") ?? settings.get("statusReact")) : undefined;
+      const isReactOn = settingReact !== undefined ? Boolean(settingReact) : true;
+
+      if (isReactOn && participant) {
+        const emoji = (settings?.get ? (settings.get("statusEmoji") || settings.get("reactEmoji")) : null) || "❤️";
         await sock.sendMessage(
           "status@broadcast",
           {
@@ -103,7 +108,7 @@ module.exports = {
               key: {
                 remoteJid: "status@broadcast",
                 id: statusId,
-                participant,
+                participant: participant,
                 fromMe: false
               }
             }
@@ -111,28 +116,26 @@ module.exports = {
           { statusJidList: [participant] }
         ).catch(() => {});
       }
-    } catch (err) {}
+    } catch (err) {
+      console.error("Auto Status Error:", err.message);
+    }
   },
 
-  // 3. Status Saver Message Interceptor (oni, one, ewanna ආදී reply messages අල්ලා ගැනීම)
-  async onReply({ sock, msg, from, body, quotedStanzaId, isOwner }) {
+  // 3. Status Saver Message Interceptor
+  async onReply({ sock, msg, from, body, quotedStanzaId }) {
     if (!quotedStanzaId || !body) return false;
 
-    // Boot වීමට පෙර පැමිණි පරණ messages drop කිරීම
     const msgTime = Number(msg.messageTimestamp || 0);
     if (msgTime && msgTime < BOT_BOOT_TIME) return false;
 
-    // Trigger words check කිරීම
     const word = body.trim().toLowerCase();
     if (!TRIGGERS.has(word)) return false;
 
-    // Duplicate multi-execution block කිරීම
     const reqKey = `${from}_${quotedStanzaId}_${word}`;
     if (global.processedStatusRequests.has(reqKey)) return false;
     global.processedStatusRequests.add(reqKey);
     setTimeout(() => global.processedStatusRequests.delete(reqKey), 30 * 1000);
 
-    // Cache එකෙන් Status Message එක සොයා ගැනීම
     const quotedMsg = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
     const targetStatus = global.statusCache.get(quotedStanzaId) || (quotedMsg ? {
       key: { remoteJid: "status@broadcast", id: quotedStanzaId },
@@ -145,7 +148,7 @@ module.exports = {
     return true;
   },
 
-  // 4. Direct Command Execution (,status <reply>)
+  // 4. Command Manual Execution (,status)
   async execute({ sock, msg, from, quoted, reply }) {
     const quotedStanzaId = msg.message?.extendedTextMessage?.contextInfo?.stanzaId;
     const targetStatus = quotedStanzaId ? global.statusCache.get(quotedStanzaId) : null;
