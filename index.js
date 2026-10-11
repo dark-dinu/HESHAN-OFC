@@ -3,7 +3,8 @@ const {
     useMultiFileAuthState, 
     DisconnectReason, 
     delay, 
-    makeCacheableSignalKeyStore 
+    makeCacheableSignalKeyStore,
+    Browsers
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const mongoose = require('mongoose');
@@ -18,7 +19,6 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Configs
 const MONGO_URI = "mongodb+srv://diniduheshan40_db_user:Heshan2007@cluster0.5gazebm.mongodb.net/?appName=Cluster0";
 const BOT_NAME = '𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂';
 const devs = ['94719845166@s.whatsapp.net', '15947733680169@s.whatsapp.net'];
@@ -30,7 +30,7 @@ mongoose.connect(MONGO_URI)
     .then(() => console.log('✅ MongoDB Connected to 𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂!'))
     .catch(err => console.log('❌ DB Error:', err));
 
-// Bot Command Execution Engine
+// Bot Command Engine
 function registerCommands(sock) {
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
@@ -48,7 +48,6 @@ function registerCommands(sock) {
             return;
         }
 
-        // Mode Rules
         if (global.botSettings.mode === 'private' && !isDev && !isMe) return;
         if (global.botSettings.mode === 'group' && !sender.endsWith('@g.us') && !isDev) return;
 
@@ -72,7 +71,7 @@ function registerCommands(sock) {
     });
 }
 
-// Main Running Bot
+// Global active bot starter
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('./session');
 
@@ -83,7 +82,9 @@ async function startBot() {
         },
         printQRInTerminal: false,
         logger: pino({ level: 'fatal' }),
-        browser: ['Ubuntu', 'Chrome', '20.0.04']
+        browser: Browsers.macOS('Desktop'),
+        defaultQueryTimeoutMs: undefined,
+        syncFullHistory: false
     });
 
     sock.ev.on('creds.update', async () => {
@@ -117,10 +118,7 @@ async function startBot() {
     });
 }
 
-// ==========================================
-// 🌐 Pairing Web Portal (Fast & Reliable)
-// ==========================================
-
+// Web UI
 app.get('/', (req, res) => {
     res.send(`
     <!DOCTYPE html>
@@ -160,7 +158,7 @@ app.get('/', (req, res) => {
             <div id="resultBox">
                 <p style="color: #bbb; margin-bottom: 10px;">Click below to copy your code:</p>
                 <div class="code-display" id="codeText" onclick="copyCode()"></div>
-                <p style="font-size: 11px; color: #777; margin-top: 10px;">WhatsApp > Linked Devices > Link with Phone Number</p>
+                <p style="font-size: 12px; color: #00e676; margin-top: 10px;">⏳ Enter this on WhatsApp now! Connecting automatically...</p>
             </div>
 
             <div class="footer">© 2026 ${BOT_NAME} • Ultra Fast Pairing</div>
@@ -217,16 +215,18 @@ app.get('/', (req, res) => {
     `);
 });
 
-// JSON API Route (Never blocks the UI)
+// Pairing Code Generator (Keeps socket alive so WhatsApp links instantly)
 app.get('/api/pair', async (req, res) => {
     let phone = req.query.phone;
     if (!phone) return res.json({ status: false, message: 'Phone number is required' });
 
     phone = phone.replace(/[^0-9]/g, '');
-    const tempSession = `./temp_${Date.now()}`;
+
+    // Reset session folder for clean link
+    if (fs.existsSync('./session')) fs.rmSync('./session', { recursive: true, force: true });
 
     try {
-        const { state, saveCreds } = await useMultiFileAuthState(tempSession);
+        const { state, saveCreds } = await useMultiFileAuthState('./session');
 
         const sock = makeWASocket({
             auth: {
@@ -235,34 +235,38 @@ app.get('/api/pair', async (req, res) => {
             },
             printQRInTerminal: false,
             logger: pino({ level: 'fatal' }),
-            browser: ['Ubuntu', 'Chrome', '20.0.04']
+            browser: Browsers.macOS('Desktop'),
+            defaultQueryTimeoutMs: undefined,
+            syncFullHistory: false
         });
 
-        sock.ev.on('creds.update', saveCreds);
-
-        // When connection succeeds after user enters code on WhatsApp
-        sock.ev.on('connection.update', async (update) => {
-            const { connection } = update;
-            if (connection === 'open') {
-                console.log(`✅ Device paired successfully! Syncing credentials...`);
-                await delay(2000);
-                if (fs.existsSync(`${tempSession}/creds.json`)) {
-                    const creds = JSON.parse(fs.readFileSync(`${tempSession}/creds.json`, 'utf-8'));
-                    await saveSession('main_session', creds);
-                    
-                    // Copy to permanent folder
-                    if (!fs.existsSync('./session')) fs.mkdirSync('./session', { recursive: true });
-                    fs.cpSync(tempSession, './session', { recursive: true });
-                }
-                
-                // Cleanup temp
-                fs.rmSync(tempSession, { recursive: true, force: true });
-                registerCommands(sock);
+        sock.ev.on('creds.update', async () => {
+            await saveCreds();
+            if (fs.existsSync('./session/creds.json')) {
+                const creds = JSON.parse(fs.readFileSync('./session/creds.json', 'utf-8'));
+                await saveSession('main_session', creds);
             }
         });
 
-        // Crucial 2-second delay for WS handshake
-        await delay(2000);
+        // Connection Handler: Stays active after code is entered on phone
+        sock.ev.on('connection.update', async (update) => {
+            const { connection } = update;
+            if (connection === 'open') {
+                console.log(`✅ ${BOT_NAME} Connected via Pairing Code!`);
+                await delay(2000);
+                if (fs.existsSync('./session/creds.json')) {
+                    const creds = JSON.parse(fs.readFileSync('./session/creds.json', 'utf-8'));
+                    await saveSession('main_session', creds);
+                }
+                registerCommands(sock);
+                try {
+                    await sock.sendMessage(devs[0], { text: `🚀 *${BOT_NAME}* Successfully Linked!` });
+                } catch(e) {}
+            }
+        });
+
+        // Small delay to let WhatsApp server acknowledge pairing socket
+        await delay(3000);
 
         let code = await sock.requestPairingCode(phone);
         code = code?.match(/.{1,4}/g)?.join('-') || code;
@@ -271,16 +275,13 @@ app.get('/api/pair', async (req, res) => {
 
     } catch (err) {
         console.error('Pairing Error:', err);
-        if (fs.existsSync(tempSession)) fs.rmSync(tempSession, { recursive: true, force: true });
-        return res.json({ status: false, message: 'WhatsApp server busy. Wait 5s and try again.' });
+        return res.json({ status: false, message: 'Server busy. Wait 5s and try again.' });
     }
 });
 
-// Application Starter
+// App Entry
 app.listen(PORT, async () => {
-    console.log(`🌐 Web Portal Running: http://localhost:${PORT}`);
-    
-    // Check MongoDB for saved session
+    console.log(`🌐 Server running on port ${PORT}`);
     const savedCreds = await getSession('main_session');
     if (savedCreds) {
         if (!fs.existsSync('./session')) fs.mkdirSync('./session', { recursive: true });
