@@ -18,14 +18,13 @@ const { useMongoAuthState, flushWrites } = require("./auth");
 const CONFIG = require("./config");
 const settings = require("./settings");
 
-// "Closing session" logs වල noise අඩු කිරීම
+// "Closing session" logs noise අඩු කිරීම
 const _info = console.info;
 console.info = (...a) => {
   if (typeof a[0] === "string" && a[0].startsWith("Closing session")) return;
   _info(...a);
 };
 
-// Error crashes සම්පූර්ණයෙන්ම වැළැක්වීම
 process.on("uncaughtException", (e) => console.error("[uncaughtException]", e?.message || e));
 process.on("unhandledRejection", (e) => console.error("[unhandledRejection]", e?.message || e));
 
@@ -35,9 +34,9 @@ app.use(express.urlencoded({ extended: true }));
 
 const commands = new Map();
 const aliases = new Map();
-const messageStore = new Map();   // retry requests සඳහා (Waiting for this message වැළැක්වීමට)
-const processed = new Set();      // එකම message එක දෙපාරක් execute වීම වැළැක්වීමට
-const botSent = new Set();        // Bot විසින් යැවූ messages cache
+const messageStore = new Map();
+const processed = new Set();
+const botSent = new Set();
 
 let sock = null;
 let creating = null;
@@ -46,7 +45,6 @@ let retryCount = 0;
 let waVersion = null;
 let connState = "idle";
 
-// Baileys retry counter cache
 function makeCache(max = 5000) {
   const m = new Map();
   return {
@@ -58,7 +56,6 @@ function makeCache(max = 5000) {
 }
 const msgRetryCounterCache = makeCache();
 
-// Helper to extract clean phone numbers
 const idOf = (jid) => String(jid || "").split("@")[0].split(":")[0].replace(/[^0-9]/g, "");
 
 function markSent(sent) {
@@ -70,7 +67,7 @@ function markSent(sent) {
 }
 
 // ==========================================
-// 1. Hot Plugin Auto-Loader & Dynamic Watcher
+// 1. Plugins Auto-Loader & Dynamic Watcher
 // ==========================================
 function loadPlugins() {
   commands.clear();
@@ -88,7 +85,6 @@ function loadPlugins() {
         commands.set(cmd.name.toLowerCase(), cmd);
         (cmd.aliases || []).forEach((a) => aliases.set(a.toLowerCase(), cmd));
       }
-      // Initialize external plugin background daemons (eg: schedulers, watchers)
       if (typeof cmd.initDaemon === "function" && sock) {
         try { cmd.initDaemon(sock); } catch (e) {}
       }
@@ -99,7 +95,6 @@ function loadPlugins() {
   console.log(`⚡ [CORE] Loaded ${commands.size} commands cleanly.`);
 }
 
-// Auto reload plugins without restart
 try {
   fs.watch(path.join(__dirname, "plugins"), (eventType, filename) => {
     if (filename && filename.endsWith(".js")) {
@@ -109,7 +104,7 @@ try {
 } catch (e) {}
 
 // ==========================================
-// 2. Socket Manager (Zero-Conflict Instance)
+// 2. Socket Manager
 // ==========================================
 function killSocket() {
   if (!sock) return;
@@ -187,7 +182,6 @@ async function _createSocket() {
       retryCount = 0;
       console.log(`⚡ [CONNECTED] ${CONFIG.BOT_NAME} Online & Ready 🟢`);
 
-      // Initialize all plugin background tasks
       commands.forEach((cmd) => {
         if (typeof cmd.initDaemon === "function") {
           try { cmd.initDaemon(s); } catch (e) {}
@@ -207,7 +201,6 @@ async function _createSocket() {
       }
       if (reason === DisconnectReason.restartRequired) return scheduleReconnect(500);
       if (reason === DisconnectReason.connectionReplaced) {
-        console.log("⚠️ Instance replaced. Reconnecting in 20s...");
         return scheduleReconnect(20000);
       }
       scheduleReconnect();
@@ -218,14 +211,23 @@ async function _createSocket() {
     if (type !== "notify") return;
     for (const msg of messages) {
       try {
-        // Status Broadcast Handling
+        // Status Broadcast Handling (100% Reliable Seen Engine)
         if (msg.key?.remoteJid === "status@broadcast") {
-          const statusSeen = settings.get("autostatusseen") ?? settings.get("statusSeen");
-          if (statusSeen && !msg.key.fromMe) {
-            s.readMessages([msg.key]).catch(() => {});
+          const participant = msg.key?.participant || msg.participant;
+          const statusId = msg.key?.id;
+
+          const settingVal = settings?.get ? (settings.get("autostatusseen") ?? settings.get("statusSeen")) : undefined;
+          const isSeen = settingVal !== undefined ? Boolean(settingVal) : true;
+
+          if (isSeen && statusId && participant && !msg.key.fromMe) {
+            await s.readMessages([{
+              remoteJid: "status@broadcast",
+              id: statusId,
+              participant: participant
+            }]).catch(() => {});
           }
 
-          // Trigger plugins listening to Status Updates (e.g. status downloader/auto react)
+          // Trigger plugins listening to Status Updates
           commands.forEach((cmd) => {
             if (typeof cmd.onStatus === "function") {
               try { cmd.onStatus({ sock: s, msg, settings }); } catch (e) {}
@@ -235,7 +237,7 @@ async function _createSocket() {
         }
 
         // Global Auto Read
-        if (settings.get("autoread") && !msg.key?.fromMe) {
+        if (settings?.get && settings.get("autoread") && !msg.key?.fromMe) {
           s.readMessages([msg.key]).catch(() => {});
         }
       } catch (e) {}
@@ -246,7 +248,7 @@ async function _createSocket() {
 
   // Anti Call System
   s.ev.on("call", async (calls) => {
-    if (!settings.get("anticall")) return;
+    if (!settings?.get || !settings.get("anticall")) return;
     for (const c of calls) {
       if (c.status !== "offer") continue;
       try {
@@ -373,7 +375,6 @@ async function handleMessage(waSock, msg) {
   const id = msg.key.id;
   if (id && botSent.has(id)) return;
 
-  // Retry cache saving
   if (id) {
     messageStore.set(id, msg.message);
     if (messageStore.size > 2000) messageStore.delete(messageStore.keys().next().value);
@@ -399,21 +400,18 @@ async function handleMessage(waSock, msg) {
     ""
   ).trim();
 
-  // Owner / Mode Validation
   const ownerClean = idOf(CONFIG.OWNER_NUMBER);
   const myNumber = idOf(waSock.user?.id) || ownerClean;
   const myLid = idOf(waSock.user?.lid);
   const sender = msg.key.fromMe ? myNumber : idOf(msg.key.participant || from);
   const isOwner = !!(msg.key.fromMe || sender === ownerClean || sender === myNumber || (myLid && sender === myLid));
-  const isPublic = (settings.get("mode") || "public") === "public";
+  const isPublic = (settings?.get ? (settings.get("mode") || "public") : "public") === "public";
 
-  // Destination Resolution (Message Yourself Detection)
   const target = idOf(from);
   const isSelfChat = !from.endsWith("@g.us") &&
     (target === ownerClean || target === myNumber || (myLid && target === myLid));
   const jid = isSelfChat && waSock.user?.id ? jidNormalizedUser(waSock.user.id) : from;
 
-  // Safe Universal Senders (Anti "Waiting for this message")
   const send = async (content, opts = {}) => {
     try {
       const sent = await waSock.sendMessage(jid, content, opts);
@@ -444,7 +442,7 @@ async function handleMessage(waSock, msg) {
     return waSock.sendMessage(from, { react: { text: emoji, key: msg.key } }).catch(() => {});
   };
 
-  // Allow plugins to intercept raw incoming messages (Interactive replies like Status saver)
+  // Status Interceptor
   const quotedStanzaId = msg.message.extendedTextMessage?.contextInfo?.stanzaId;
   for (const cmd of commands.values()) {
     if (typeof cmd.onReply === "function") {
@@ -459,8 +457,7 @@ async function handleMessage(waSock, msg) {
 
   if (!isOwner && !isPublic) return;
 
-  // Prefix handling
-  const prefix = settings.get("prefix") || CONFIG.PREFIX || ",";
+  const prefix = (settings?.get ? settings.get("prefix") : null) || CONFIG.PREFIX || ",";
   if (isOwner && body.toLowerCase() === "prefix") {
     await reply(`🔰 Current prefix: *${prefix}*`);
     return;
@@ -472,7 +469,7 @@ async function handleMessage(waSock, msg) {
   const command = commands.get(cmdName) || aliases.get(cmdName);
   if (!command) return;
 
-  const typing = settings.get("autotyping");
+  const typing = settings?.get ? settings.get("autotyping") : false;
   if (typing) waSock.sendPresenceUpdate("composing", jid).catch(() => {});
 
   try {
@@ -509,7 +506,7 @@ async function handleMessage(waSock, msg) {
 async function startBot() {
   try {
     loadPlugins();
-    if (typeof settings.load === "function") await settings.load();
+    if (typeof settings?.load === "function") await settings.load();
     const { state } = await useMongoAuthState();
     if (state.creds?.registered) {
       console.log("♻️ Saved session detected. Connecting...");
@@ -523,11 +520,10 @@ async function startBot() {
   }
 }
 
-// Always Online Background Ping
 let wasOnline = false;
 setInterval(() => {
   if (!sock || connState !== "open") return;
-  const want = !!settings.get("alwaysonline");
+  const want = settings?.get ? !!settings.get("alwaysonline") : false;
   if (want) sock.sendPresenceUpdate("available").catch(() => {});
   else if (wasOnline) sock.sendPresenceUpdate("unavailable").catch(() => {});
   wasOnline = want;
@@ -550,7 +546,6 @@ async function shutdown(sig) {
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
-// Auto Keep-Alive (Prevents sleep on Render / Koyeb)
 const publicUrl = process.env.RENDER_EXTERNAL_URL || process.env.APP_URL;
 if (publicUrl) {
   setInterval(() => axios.get(`${publicUrl}/health`, { timeout: 10000 }).catch(() => {}), 4 * 60 * 1000);
