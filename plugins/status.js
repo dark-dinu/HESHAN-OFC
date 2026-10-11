@@ -1,228 +1,272 @@
-const {
-  downloadMediaMessage,
-  normalizeMessageContent,
-  jidNormalizedUser
-} = require("@whiskeysockets/baileys");
+const { downloadMediaMessage } = require("@whiskeysockets/baileys");
 
+// Bot Session Settings & Memory Cache
+global.statusSettings = global.statusSettings || new Map();
 global.statusCache = global.statusCache || new Map();
 global.processedStatusRequests = global.processedStatusRequests || new Set();
 
 const BOT_BOOT_TIME = Math.floor(Date.now() / 1000);
-const DEBUG = false; // true කරලා logs බලන්න
 
-// Status Saver Trigger Words
-const TRIGGERS = new Set([
-  "oni", "one", "denna", "ewanna", "save", "send", "dapan", "ewapan", "dako", "dipan",
-  "ඕනි", "ඔනි", "එවන්න", "දාන්න", "දෙන්න", "දාන්නකො", "එවන්නකො"
-]);
-
-const defaultCaption = "> *✗ 𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂 ✗*";
-
-// Status එක යවන්න ඕන chat එක (තමන්ගේ number එකට)
-function getDestination(sock, msg, from) {
-  try {
-    if (msg?.key?.fromMe && sock?.user?.id) {
-      return jidNormalizedUser(sock.user.id);
-    }
-  } catch {}
-  return from;
+function getBotPhone(sock) {
+  const userJid = sock.user?.id || "";
+  return userJid.split(":")[0].replace(/[^0-9]/g, "");
 }
 
-// 1. Status Media Dispatcher
-async function deliverStatus(sock, dest, targetMsg) {
-  try {
-    // viewOnce / ephemeral wrap අයින් කරලා real content ගන්නවා
-    const sObj = normalizeMessageContent(targetMsg.message);
-    if (!sObj) return false;
+function getSettings(botPhone, dbSettings) {
+  if (!global.statusSettings.has(botPhone)) {
+    global.statusSettings.set(botPhone, {
+      seen: dbSettings?.get ? (dbSettings.get("autostatusseen") ?? true) : true,
+      react: dbSettings?.get ? (dbSettings.get("autostatusreact") ?? true) : true,
+      emoji: (dbSettings?.get ? dbSettings.get("statusEmoji") : null) || "😼"
+    });
+  }
+  return global.statusSettings.get(botPhone);
+}
 
-    const isImage = Boolean(sObj.imageMessage);
-    const isVideo = Boolean(sObj.videoMessage);
-    const isAudio = Boolean(sObj.audioMessage);
+// Status Media Sender Helper
+async function deliverStatusMedia(sock, msg, from, targetStatusMsg) {
+  try {
+    await sock.sendMessage(from, { react: { text: "😒", key: msg.key } }).catch(() => {});
+
+    const statusObj = targetStatusMsg.message;
+    if (!statusObj) return false;
+
+    const isImage = Boolean(statusObj.imageMessage);
+    const isVideo = Boolean(statusObj.videoMessage);
+    const isAudio = Boolean(statusObj.audioMessage);
+
+    const defaultCaption = "> *ʜᴇꜱʜᴀɴ ᴏꜰᴄ 👑*";
 
     if (isImage || isVideo || isAudio) {
       const buffer = await downloadMediaMessage(
-        targetMsg,
+        targetStatusMsg,
         "buffer",
         {},
         { reuploadRequest: sock.updateMediaMessage }
       );
 
-      if (!buffer || buffer.length === 0) return false;
+      if (!buffer || buffer.length === 0) throw new Error("Media buffer empty");
 
       if (isImage) {
-        const old = sObj.imageMessage.caption;
-        const cap = old ? `${old}\n\n${defaultCaption}` : defaultCaption;
-        await sock.sendMessage(dest, { image: buffer, caption: cap });
+        const cap = statusObj.imageMessage.caption 
+          ? `${statusObj.imageMessage.caption}\n\n${defaultCaption}` 
+          : defaultCaption;
+        await sock.sendMessage(from, { image: buffer, caption: cap }, { quoted: msg });
       } else if (isVideo) {
-        const old = sObj.videoMessage.caption;
-        const cap = old ? `${old}\n\n${defaultCaption}` : defaultCaption;
-        await sock.sendMessage(dest, { video: buffer, caption: cap });
-      } else {
-        await sock.sendMessage(dest, {
-          audio: buffer,
-          mimetype: "audio/mp4",
-          ptt: true
-        });
+        const cap = statusObj.videoMessage.caption 
+          ? `${statusObj.videoMessage.caption}\n\n${defaultCaption}` 
+          : defaultCaption;
+        await sock.sendMessage(from, { video: buffer, caption: cap }, { quoted: msg });
+      } else if (isAudio) {
+        await sock.sendMessage(from, { audio: buffer, mimetype: "audio/mp4", ptt: false }, { quoted: msg });
       }
-      return true;
+    } else {
+      // Text Status
+      const textStatus = statusObj.conversation || statusObj.extendedTextMessage?.text || "";
+      await sock.sendMessage(from, {
+        text: `📝 *STATUS TEXT:*\n\n${textStatus}\n\n${defaultCaption}`
+      }, { quoted: msg });
     }
 
-    const textStatus = sObj.conversation || sObj.extendedTextMessage?.text || "";
-    if (!textStatus) return false;
-
-    await sock.sendMessage(dest, {
-      text: `📝 *STATUS TEXT:*\n\n${textStatus}\n\n${defaultCaption}`
-    });
+    await sock.sendMessage(from, { react: { text: "😘", key: msg.key } }).catch(() => {});
     return true;
-  } catch (e) {
-    console.error("Status Deliver Error:", e.message);
+  } catch (err) {
+    console.error("[STATUS DELIVER ERROR]:", err.message);
+    await sock.sendMessage(from, { react: { text: "🥹", key: msg.key } }).catch(() => {});
     return false;
   }
 }
 
 module.exports = {
   name: "status",
-  aliases: ["stat", "savestatus"],
-  description: "Status Automation Engine & Interactive Downloader",
+  aliases: ["stseen", "stract", "setst", "statussave", "ssave"],
+  category: "utility",
+  description: "Status automation controls and interactive status saver",
 
-  // 2. Status Auto Seen & Auto React
+  // 1. Core Event Hook (index.js එකෙන් status එකක් ආපු ගමන් call වේ)
   async onStatus({ sock, msg, settings }) {
     try {
       const statusId = msg.key?.id;
-      // අලුත් Baileys වල participant @lid වෙන්න පුළුවන්; Alt එක PN
-      const participant =
-        msg.key?.participantAlt || msg.key?.participant || msg.participant;
-      const rawParticipant = msg.key?.participant || msg.participant || participant;
+      const participant = msg.key?.participant || msg.participant;
       if (!statusId) return;
 
-      if (DEBUG) console.log("onStatus:", { statusId, participant, fromMe: msg.key.fromMe });
-
-      // Cache
+      // Status Cache
       global.statusCache.set(statusId, msg);
       setTimeout(() => global.statusCache.delete(statusId), 12 * 60 * 60 * 1000);
 
-      // තමන් දාන status skip
-      if (msg.key.fromMe) return;
+      if (msg.key.fromMe || !participant) return;
 
-      // A. Auto Seen (Default: ON)
-      const settingSeen = settings?.get
-        ? (settings.get("autostatusseen") ?? settings.get("statusSeen"))
-        : undefined;
-      const isSeenOn = settingSeen !== undefined ? Boolean(settingSeen) : true;
+      const botPhone = getBotPhone(sock);
+      const st = getSettings(botPhone, settings);
 
-      if (isSeenOn) {
-        await sock
-          .readMessages([
-            {
-              remoteJid: "status@broadcast",
-              id: statusId,
-              participant: rawParticipant
-            }
-          ])
-          .catch((e) => DEBUG && console.log("readMessages err:", e.message));
+      // A. Auto Seen
+      if (st.seen) {
+        await sock.readMessages([{
+          remoteJid: "status@broadcast",
+          id: statusId,
+          participant: participant
+        }]).catch(() => {});
       }
 
-      // B. Auto React (Default: ON, ❤️)
-      const settingReact = settings?.get
-        ? (settings.get("autostatusreact") ?? settings.get("statusReact"))
-        : undefined;
-      const isReactOn = settingReact !== undefined ? Boolean(settingReact) : true;
-
-      if (isReactOn && rawParticipant) {
-        const emoji =
-          (settings?.get
-            ? settings.get("statusEmoji") || settings.get("reactEmoji")
-            : null) || "❤️";
-
-        await sock
-          .sendMessage(
-            "status@broadcast",
-            {
-              react: {
-                text: emoji,
-                key: {
-                  remoteJid: "status@broadcast",
-                  id: statusId,
-                  participant: rawParticipant,
-                  fromMe: false
-                }
+      // B. Auto React
+      if (st.react && st.emoji) {
+        await sock.sendMessage(
+          "status@broadcast",
+          {
+            react: {
+              text: st.emoji,
+              key: {
+                remoteJid: "status@broadcast",
+                id: statusId,
+                participant: participant,
+                fromMe: false
               }
-            },
-            { statusJidList: [rawParticipant] }
-          )
-          .catch((e) => DEBUG && console.log("react err:", e.message));
+            }
+          },
+          { statusJidList: [participant] }
+        ).catch(() => {});
       }
-    } catch (err) {
-      console.error("Auto Status Error:", err.message);
-    }
+    } catch (err) {}
   },
 
-  // 3. Status Saver Reply Interceptor
-  async onReply({ sock, msg, from, body, quotedStanzaId }) {
-    if (DEBUG) console.log("onReply:", { quotedStanzaId, body, fromMe: msg?.key?.fromMe });
+  // 2. Command Handlers (.status, .stseen, .stract, .setst)
+  async execute({ sock, msg, from, args, body, prefix, isOwner, settings, reply }) {
+    const botPhone = getBotPhone(sock);
+    const st = getSettings(botPhone, settings);
 
+    const firstWord = body.trim().slice(prefix.length).split(/ +/)[0].toLowerCase();
+
+    // A. .setst react <emoji>
+    if (firstWord === "setst") {
+      if (!isOwner) return await reply("⛔ මෙය වෙනස් කළ හැක්කේ Bot Owner හට පමණි.");
+
+      const subAction = args[0]?.toLowerCase();
+      const newEmoji = (subAction === "react" ? args[1] : args[0])?.trim();
+
+      if (!newEmoji) {
+        return await reply(`⚠️ කරුණාකර Emoji එකක් ලබාදෙන්න.\n*භාවිතය:* \`${prefix}setst react 🥺\``);
+      }
+
+      st.emoji = newEmoji;
+      global.statusSettings.set(botPhone, st);
+      if (settings?.set) settings.set("statusEmoji", newEmoji);
+
+      return await reply(`✅ *Status React Emoji යාවත්කාලීන විය:*\nනව Emoji: ${newEmoji}`);
+    }
+
+    // B. .stseen on/off
+    if (firstWord === "stseen") {
+      if (!isOwner) return await reply("⛔ මෙය වෙනස් කළ හැක්කේ Bot Owner හට පමණි.");
+
+      const state = args[0]?.toLowerCase();
+      if (state !== "on" && state !== "off") {
+        return await reply(`⚠️ *භාවිතය:* \`${prefix}stseen on\` හෝ \`${prefix}stseen off\``);
+      }
+
+      const isTurnOn = state === "on";
+      st.seen = isTurnOn;
+      global.statusSettings.set(botPhone, st);
+      if (settings?.set) settings.set("autostatusseen", isTurnOn);
+
+      return await reply(`╔══════════════════════╗
+   🕷️ 𝐇 𝐄 𝐒 𝐇 𝐀 𝐍  𝐎 𝐅 𝐂 🕷️
+╚══════════════════════╝
+
+┌─〔 ⚙️ *STATUS SEEN SETTINGS* 〕
+├─▸ 🤖 *Bot Node* : +${botPhone}
+├─▸ 🎯 *Feature*  : Auto Seen
+├─▸ ⚡ *Status*   : ${isTurnOn ? "🟢 ON" : "🔴 OFF"}
+└───────────────────────`);
+    }
+
+    // C. .stract on/off
+    if (firstWord === "stract") {
+      if (!isOwner) return await reply("⛔ මෙය වෙනස් කළ හැක්කේ Bot Owner හට පමණි.");
+
+      const state = args[0]?.toLowerCase();
+      if (state !== "on" && state !== "off") {
+        return await reply(`⚠️ *භාවිතය:* \`${prefix}stract on\` හෝ \`${prefix}stract off\``);
+      }
+
+      const isTurnOn = state === "on";
+      st.react = isTurnOn;
+      global.statusSettings.set(botPhone, st);
+      if (settings?.set) settings.set("autostatusreact", isTurnOn);
+
+      return await reply(`╔══════════════════════╗
+   🕷️ 𝐇 𝐄 𝐒 𝐇 𝐀 𝐍  𝐎 𝐅 𝐂 🕷️
+╚══════════════════════╝
+
+┌─〔 ⚙️ *STATUS REACT SETTINGS* 〕
+├─▸ 🤖 *Bot Node* : +${botPhone}
+├─▸ 🎯 *Feature*  : Auto React
+├─▸ ⚡ *Status*   : ${isTurnOn ? "🟢 ON" : "🔴 OFF"}
+├─▸ 🎭 *Emoji*    : ${st.emoji}
+└───────────────────────`);
+    }
+
+    // D. Quoted Status Save via Command
+    const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+    const quotedId = msg.message?.extendedTextMessage?.contextInfo?.stanzaId;
+
+    if (quoted) {
+      const cached = global.statusCache.get(quotedId) || {
+        key: { remoteJid: "status@broadcast", id: quotedId },
+        message: quoted
+      };
+      return await deliverStatusMedia(sock, msg, from, cached);
+    }
+
+    // Default Dashboard
+    return await reply(`╔══════════════════════╗
+   🕷️ 𝐇 𝐄 𝐒 𝐇 𝐀 𝐍  𝐎 𝐅 𝐂 🕷️
+╚══════════════════════╝
+
+┌─〔 📺 *STATUS AUTOMATION* 〕
+├─▸ 👁️ *Auto Seen*  : ${st.seen ? "🟢 ON" : "🔴 OFF"}
+├─▸ 💖 *Auto React* : ${st.react ? "🟢 ON" : "🔴 OFF"}
+├─▸ 🎭 *React Emoji*: ${st.emoji}
+└───────────────────────
+
+📌 *පාලනය කිරීමට:*
+• \`${prefix}stseen on\` / \`off\`
+• \`${prefix}stract on\` / \`off\`
+• \`${prefix}setst react 🥺\`
+
+📥 *Status එකක් ලබාගැනීමට:*
+Status එකකට Reply කර *එවන්න*, *send*, *දාපන්*, *oni* ලෙස යවන්න.`);
+  },
+
+  // 3. Interactive Reply Saver (oni, ewanna ආදී triggers සඳහා)
+  async onReply({ sock, msg, from, body, quotedStanzaId }) {
     if (!quotedStanzaId || !body) return false;
 
     const msgTime = Number(msg.messageTimestamp || 0);
     if (msgTime && msgTime < BOT_BOOT_TIME) return false;
 
-    const word = body.trim().toLowerCase();
-    if (!TRIGGERS.has(word)) return false;
+    const rawWord = body.trim().toLowerCase();
+    const triggerWords = [
+      "oni", "ඔනි", "ඕනි", "one", 
+      "ewanna", "එවන්න", "ewapan", "එවපන්", "ewahan", "එවහන්",
+      "dapan", "දාපන්", "danna", "දාන්න", "denna", "දෙන්න",
+      "send", "sendme", "save", "saveme", "dako", "dipan", "දාන්නකො", "එවන්නකො"
+    ];
 
-    const reqKey = `${from}_${quotedStanzaId}_${word}`;
+    if (!triggerWords.includes(rawWord)) return false;
+
+    const reqKey = `${from}_${quotedStanzaId}_${rawWord}`;
     if (global.processedStatusRequests.has(reqKey)) return false;
     global.processedStatusRequests.add(reqKey);
     setTimeout(() => global.processedStatusRequests.delete(reqKey), 30 * 1000);
 
-    // reply එක status එකකටද කියලා check කරන්න (අනිත් chat වල "send" reply ignore)
-    const ctx = msg.message?.extendedTextMessage?.contextInfo;
-    const quotedMsg = ctx?.quotedMessage;
-    const isStatusReply =
-      global.statusCache.has(quotedStanzaId) || from === "status@broadcast" || ctx?.remoteJid === "status@broadcast";
-    if (!isStatusReply) return false;
+    const quotedMsg = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+    const target = global.statusCache.get(quotedStanzaId) || (quotedMsg ? {
+      key: { remoteJid: "status@broadcast", id: quotedStanzaId },
+      message: quotedMsg
+    } : null);
 
-    const targetStatus =
-      global.statusCache.get(quotedStanzaId) ||
-      (quotedMsg
-        ? {
-            key: {
-              remoteJid: "status@broadcast",
-              id: quotedStanzaId,
-              participant: ctx?.participant
-            },
-            message: quotedMsg
-          }
-        : null);
+    if (!target) return false;
 
-    if (!targetStatus) return false;
-
-    const dest = getDestination(sock, msg, from);
-    return await deliverStatus(sock, dest, targetStatus);
-  },
-
-  // 4. Manual Command (,status)
-  async execute({ sock, msg, from, quoted, reply }) {
-    const ctx = msg.message?.extendedTextMessage?.contextInfo;
-    const quotedStanzaId = ctx?.stanzaId;
-    const cached = quotedStanzaId ? global.statusCache.get(quotedStanzaId) : null;
-    const quotedContent = quoted || ctx?.quotedMessage;
-
-    if (!cached && !quotedContent) {
-      return await reply("⚠️ කරුණාකර Status එකකට reply කර මෙම command එක ලබාදෙන්න.");
-    }
-
-    const payload =
-      cached || {
-        key: {
-          remoteJid: "status@broadcast",
-          id: quotedStanzaId,
-          participant: ctx?.participant
-        },
-        message: quotedContent
-      };
-
-    const dest = getDestination(sock, msg, from);
-    const ok = await deliverStatus(sock, dest, payload);
-    if (!ok) await reply("❌ Status media එක download කරගත නොහැකි විය.");
+    return await deliverStatusMedia(sock, msg, from, target);
   }
 };
