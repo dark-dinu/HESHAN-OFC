@@ -17,6 +17,9 @@ global.botSettings = { mode: 'public' };
 const devs = ['94719845166@s.whatsapp.net', '15947733680169@s.whatsapp.net'];
 const BOT_NAME = '𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂';
 
+// ✅ මේක තමයි අලුතින් දැම්මේ (Global Socket Reference)
+let botSocket;
+
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('./session'); 
 
@@ -24,9 +27,12 @@ async function startBot() {
     const sock = makeWASocket({
         auth: state,
         printQRInTerminal: false,
-        logger: pino({ level: 'silent' }), // Log වහලා තියෙන්නේ, අවුලක් තියේනම් 'info' කරන්න පුළුවන්
+        logger: pino({ level: 'silent' }),
         browser: Browsers.macOS('Desktop'),
     });
+
+    // Global variable එකට අලුත් socket එක දානවා
+    botSocket = sock;
 
     sock.ev.on('creds.update', saveCreds);
 
@@ -36,7 +42,6 @@ async function startBot() {
         if (connection === 'close') {
             const statusCode = lastDisconnect.error?.output?.statusCode;
             
-            // Logged out, Unauthorized or bad session -> Clear session folder
             if (statusCode === DisconnectReason.loggedOut || statusCode === 401 || statusCode === 403) {
                 console.log('❌ Session Invalid or Logged Out! Clearing session...');
                 if (fs.existsSync('./session')) {
@@ -44,20 +49,16 @@ async function startBot() {
                 }
                 console.log('🔄 Restarting Bot from scratch...');
                 setTimeout(startBot, 3000);
-            } 
-            // Other disconnect reasons -> Reconnect with a delay
-            else {
+            } else {
                 console.log(`⚠️ Connection Closed (Reason: ${statusCode}). Reconnecting in 3s...`);
-                setTimeout(startBot, 3000); // 3-second delay prevents infinite fast loops
+                setTimeout(startBot, 3000); 
             }
         } 
         else if (connection === 'open') {
             console.log(`✅ ${BOT_NAME} is Online & Fast!`);
             try {
                 await sock.sendMessage(devs[0], { text: `🚀 *${BOT_NAME}* Successfully Started!\n\nBot is running at Super Speed ⚡` });
-            } catch (e) {
-                // Ignore if unable to send message to dev
-            }
+            } catch (e) {}
         }
     });
 
@@ -70,14 +71,12 @@ async function startBot() {
         const isMe = msg.key.fromMe;
         const isDev = devs.includes(msg.participant || sender);
 
-        // 🩷 Auto Status Seen & React
         if (sender === 'status@broadcast') {
             await sock.readMessages([msg.key]);
             await sock.sendMessage(sender, { react: { text: '🩷', key: msg.key } });
             return;
         }
 
-        // Mode Controller
         if (global.botSettings.mode === 'private' && !isDev && !isMe) return;
         if (global.botSettings.mode === 'group' && !sender.endsWith('@g.us') && !isDev) return;
 
@@ -89,7 +88,6 @@ async function startBot() {
         const args = text.slice(1).trim().split(/ +/);
         const command = args.shift().toLowerCase();
 
-        // Command Handler
         try {
             const cmdPath = path.join(__dirname, 'commands', `${command}.js`);
             if (fs.existsSync(cmdPath)) {
@@ -165,7 +163,25 @@ async function startBot() {
         }
         
         try {
-            const code = await sock.requestPairingCode(phone);
+            // ✅ Bot එක හරියට Load වෙලාද බලනවා
+            if (!botSocket) {
+                return res.send(htmlTemplate(`
+                    <div class="error">⏳ System is booting up... Please try again in 5 seconds.</div>
+                    <button onclick="window.location.href='/pair'">Refresh</button>
+                `));
+            }
+
+            // ✅ Bot දැනටමත් connect වෙලා (Session තියෙනවා) නම් ඒක පෙන්නනවා
+            if (botSocket.authState.creds.registered) {
+                return res.send(htmlTemplate(`
+                    <div class="code-box" style="font-size: 20px; border: 2px solid #00e676;">✅ Already Connected</div>
+                    <p style="color: #ddd;">The bot is currently active and linked to a number.</p>
+                    <button onclick="window.location.href='/pair'" style="background: rgba(255,255,255,0.1); color: #fff; border: 1px solid rgba(255,255,255,0.2);">Back</button>
+                `));
+            }
+
+            // ✅ දැන් Code එක ජෙනරේට් කරනවා
+            const code = await botSocket.requestPairingCode(phone);
             res.send(htmlTemplate(`
                 <p style="color: #ddd;">Your code is ready! Go to <b>Linked Devices</b> -> <b>Link with phone number</b> on your WhatsApp.</p>
                 <div class="code-box">${code}</div>
@@ -176,7 +192,7 @@ async function startBot() {
             res.send(htmlTemplate(`
                 <input type="text" id="phoneInput" placeholder="Enter number with country code" value="${phone}">
                 <button onclick="submitPhone()">Try Again</button>
-                <div class="error">⚠️ Failed to generate code. Please make sure the number is correct and the bot is not already connected.</div>
+                <div class="error">⚠️ Failed to generate code. WhatsApp server error or number is invalid.</div>
             `));
         }
     });
