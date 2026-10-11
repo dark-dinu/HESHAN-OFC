@@ -1,11 +1,19 @@
 const { downloadMediaMessage } = require("@whiskeysockets/baileys");
 
-// Bot Session Settings & Memory Cache
+// Memory Data & Cache Stores
 global.statusSettings = global.statusSettings || new Map();
 global.statusCache = global.statusCache || new Map();
 global.processedStatusRequests = global.processedStatusRequests || new Set();
 
 const BOT_BOOT_TIME = Math.floor(Date.now() / 1000);
+
+// Status Saver Triggers List
+const TRIGGERS = new Set([
+  "oni", "ඔනි", "ඕනි", "one", 
+  "ewanna", "එවන්න", "ewapan", "එවපන්", "ewahan", "එවහන්",
+  "dapan", "දාපන්", "danna", "දාන්න", "denna", "දෙන්න",
+  "send", "sendme", "save", "saveme", "dako", "dipan", "දාන්නකො", "එවන්නකො"
+]);
 
 function getBotPhone(sock) {
   const userJid = sock.user?.id || "";
@@ -61,7 +69,6 @@ async function deliverStatusMedia(sock, msg, from, targetStatusMsg) {
         await sock.sendMessage(from, { audio: buffer, mimetype: "audio/mp4", ptt: false }, { quoted: msg });
       }
     } else {
-      // Text Status
       const textStatus = statusObj.conversation || statusObj.extendedTextMessage?.text || "";
       await sock.sendMessage(from, {
         text: `📝 *STATUS TEXT:*\n\n${textStatus}\n\n${defaultCaption}`
@@ -83,14 +90,14 @@ module.exports = {
   category: "utility",
   description: "Status automation controls and interactive status saver",
 
-  // 1. Core Event Hook (index.js එකෙන් status එකක් ආපු ගමන් call වේ)
+  // 1. Core Event Hook (index.js එකෙන් status එකක් ආපු ගමන් run වේ)
   async onStatus({ sock, msg, settings }) {
     try {
       const statusId = msg.key?.id;
       const participant = msg.key?.participant || msg.participant;
       if (!statusId) return;
 
-      // Status Cache
+      // Status එක memory cache එකට දැමීම
       global.statusCache.set(statusId, msg);
       setTimeout(() => global.statusCache.delete(statusId), 12 * 60 * 60 * 1000);
 
@@ -99,16 +106,7 @@ module.exports = {
       const botPhone = getBotPhone(sock);
       const st = getSettings(botPhone, settings);
 
-      // A. Auto Seen
-      if (st.seen) {
-        await sock.readMessages([{
-          remoteJid: "status@broadcast",
-          id: statusId,
-          participant: participant
-        }]).catch(() => {});
-      }
-
-      // B. Auto React
+      // A. Dynamic Auto React (Emoji එක update වුණාම ඒ emoji එකෙන්ම react වේ)
       if (st.react && st.emoji) {
         await sock.sendMessage(
           "status@broadcast",
@@ -129,15 +127,16 @@ module.exports = {
     } catch (err) {}
   },
 
-  // 2. Command Handlers (.status, .stseen, .stract, .setst)
+  // 2. Command Handlers (,status, ,stseen, ,stract, ,setst)
   async execute({ sock, msg, from, args, body, prefix, isOwner, settings, reply }) {
     const botPhone = getBotPhone(sock);
     const st = getSettings(botPhone, settings);
 
-    const firstWord = body.trim().slice(prefix.length).split(/ +/)[0].toLowerCase();
+    // Command Trigger එක නිවැරදිව හඳුනා ගැනීම (Prefix ඉවත් කර)
+    const rawCmd = body.slice(prefix.length).trim().split(/\s+/)[0].toLowerCase();
 
-    // A. .setst react <emoji>
-    if (firstWord === "setst") {
+    // A. ,setst react <emoji> හෝ ,setst <emoji>
+    if (rawCmd === "setst") {
       if (!isOwner) return await reply("⛔ මෙය වෙනස් කළ හැක්කේ Bot Owner හට පමණි.");
 
       const subAction = args[0]?.toLowerCase();
@@ -154,8 +153,8 @@ module.exports = {
       return await reply(`✅ *Status React Emoji යාවත්කාලීන විය:*\nනව Emoji: ${newEmoji}`);
     }
 
-    // B. .stseen on/off
-    if (firstWord === "stseen") {
+    // B. ,stseen on/off
+    if (rawCmd === "stseen") {
       if (!isOwner) return await reply("⛔ මෙය වෙනස් කළ හැක්කේ Bot Owner හට පමණි.");
 
       const state = args[0]?.toLowerCase();
@@ -169,7 +168,7 @@ module.exports = {
       if (settings?.set) settings.set("autostatusseen", isTurnOn);
 
       return await reply(`╔══════════════════════╗
-   🕷️ 𝐇 𝐄 𝐒 𝐇 𝐀 𝐍  𝐎 𝐅 𝐂 🕷️
+   👑 𝐇 𝐄 𝐒 𝐇 𝐀 𝐍  𝐎 𝐅 𝐂 👑
 ╚══════════════════════╝
 
 ┌─〔 ⚙️ *STATUS SEEN SETTINGS* 〕
@@ -179,8 +178,8 @@ module.exports = {
 └───────────────────────`);
     }
 
-    // C. .stract on/off
-    if (firstWord === "stract") {
+    // C. ,stract on/off
+    if (rawCmd === "stract") {
       if (!isOwner) return await reply("⛔ මෙය වෙනස් කළ හැක්කේ Bot Owner හට පමණි.");
 
       const state = args[0]?.toLowerCase();
@@ -194,7 +193,7 @@ module.exports = {
       if (settings?.set) settings.set("autostatusreact", isTurnOn);
 
       return await reply(`╔══════════════════════╗
-   🕷️ 𝐇 𝐄 𝐒 𝐇 𝐀 𝐍  𝐎 𝐅 𝐂 🕷️
+   👑 𝐇 𝐄 𝐒 𝐇 𝐀 𝐍  𝐎 𝐅 𝐂 👑
 ╚══════════════════════╝
 
 ┌─〔 ⚙️ *STATUS REACT SETTINGS* 〕
@@ -205,9 +204,10 @@ module.exports = {
 └───────────────────────`);
     }
 
-    // D. Quoted Status Save via Command
-    const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
-    const quotedId = msg.message?.extendedTextMessage?.contextInfo?.stanzaId;
+    // D. Quoted Status Save via Command (,status / ,statussave)
+    const contextInfo = msg.message?.extendedTextMessage?.contextInfo;
+    const quoted = contextInfo?.quotedMessage;
+    const quotedId = contextInfo?.stanzaId;
 
     if (quoted) {
       const cached = global.statusCache.get(quotedId) || {
@@ -217,9 +217,9 @@ module.exports = {
       return await deliverStatusMedia(sock, msg, from, cached);
     }
 
-    // Default Dashboard
+    // Default Dashboard (,status පමණක් ගැසූ විට)
     return await reply(`╔══════════════════════╗
-   🕷️ 𝐇 𝐄 𝐒 𝐇 𝐀 𝐍  𝐎 𝐅 𝐂 🕷️
+   👑 𝐇 𝐄 𝐒 𝐇 𝐀 𝐍  𝐎 𝐅 𝐂 👑
 ╚══════════════════════╝
 
 ┌─〔 📺 *STATUS AUTOMATION* 〕
@@ -231,7 +231,7 @@ module.exports = {
 📌 *පාලනය කිරීමට:*
 • \`${prefix}stseen on\` / \`off\`
 • \`${prefix}stract on\` / \`off\`
-• \`${prefix}setst react 🥺\`
+• \`${prefix}setst react 😼\`
 
 📥 *Status එකක් ලබාගැනීමට:*
 Status එකකට Reply කර *එවන්න*, *send*, *දාපන්*, *oni* ලෙස යවන්න.`);
@@ -241,19 +241,14 @@ Status එකකට Reply කර *එවන්න*, *send*, *දාපන්*, *
   async onReply({ sock, msg, from, body, quotedStanzaId }) {
     if (!quotedStanzaId || !body) return false;
 
+    // Restart වීමට පෙර messages ignore කිරීම
     const msgTime = Number(msg.messageTimestamp || 0);
     if (msgTime && msgTime < BOT_BOOT_TIME) return false;
 
     const rawWord = body.trim().toLowerCase();
-    const triggerWords = [
-      "oni", "ඔනි", "ඕනි", "one", 
-      "ewanna", "එවන්න", "ewapan", "එවපන්", "ewahan", "එවහන්",
-      "dapan", "දාපන්", "danna", "දාන්න", "denna", "දෙන්න",
-      "send", "sendme", "save", "saveme", "dako", "dipan", "දාන්නකො", "එවන්නකො"
-    ];
+    if (!TRIGGERS.has(rawWord)) return false;
 
-    if (!triggerWords.includes(rawWord)) return false;
-
+    // එකම request එක දෙපාරක් process වීම වැළැක්වීම
     const reqKey = `${from}_${quotedStanzaId}_${rawWord}`;
     if (global.processedStatusRequests.has(reqKey)) return false;
     global.processedStatusRequests.add(reqKey);
