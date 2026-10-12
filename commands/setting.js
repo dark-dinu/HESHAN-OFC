@@ -2,12 +2,17 @@ const fs = require('fs');
 const path = require('path');
 const { updateSetting } = require('../models/settings');
 
+let logoBuffer = null;
+const logoPath = path.join(__dirname, '../logo.jpg');
+if (fs.existsSync(logoPath)) {
+    logoBuffer = fs.readFileSync(logoPath);
+}
+
 module.exports = {
     name: 'setting',
     execute: async (sock, msg, args, isDev, BOT_NAME, cleanSender) => {
         const chatJid = msg.key.remoteJid;
 
-        // Developer නොවේ නම්
         if (!isDev) {
             return sock.sendMessage(chatJid, { 
                 text: `❌ *Only Developers can change settings!*\n\n📱 *Your ID:* \`${cleanSender}\`` 
@@ -18,18 +23,8 @@ module.exports = {
         const current = global.botSettings;
         const status = (val) => val ? '✔️' : '❌';
 
-        // 🖼️ logo.jpg එක තිබේදැයි සොයා ගැනීම (Root එකේ හෝ assets ෆෝල්ඩරයේ)
-        let logoPath = path.join(__dirname, '../logo.jpg');
-        if (!fs.existsSync(logoPath)) {
-            logoPath = path.join(__dirname, '../assets/logo.jpg');
-        }
-
-        // ==========================================
-        // 1️⃣ .setting මෙනු එක පෙන්වීම (.setting ගැසූ විට)
-        // ==========================================
         if (!action) {
-            // 🛠️ React එක දැමීම
-            await sock.sendMessage(chatJid, { react: { text: '🛠️', key: msg.key } });
+            sock.sendMessage(chatJid, { react: { text: '🛠️', key: msg.key } }).catch(() => {});
 
             const menu = `⚙️⃝┅┅┅┅┅┅┅┅┅◇
 ┃ *ꜱᴇᴛᴛɪɴɢ*
@@ -49,7 +44,7 @@ module.exports = {
 
 *2.1  ➥ ᴩʀɪᴠᴀᴛᴇ  👤*
 *2.2  ➥ ᴩᴜʙʟɪᴄ 👥*
-*2.3  ➥ ɢʀᴏᴜᴩ 🗣️* [${current.mode.toUpperCase()}]
+*2.3  ➥ ɢʀᴏᴜᴩ 🗣️* [${current.mode?.toUpperCase()}]
 
 3️⃣ *𝐀𝐔𝐓𝐎 𝐕𝐎𝐈𝐂𝐄 🎙️*
 
@@ -76,24 +71,22 @@ module.exports = {
 *7.1  ➥ ᴏɴ ✔️*
 *7.2  ➥ ᴏꜰꜰ ❌* [${status(current.alwaysOnline)}]
 
+8️⃣ *𝐀𝐍𝐓𝐈 𝐂𝐀𝐋𝐋 🚫*
+
+*8.1  ➥ ᴏɴ ✔️*
+*8.2  ➥ ᴏꜰꜰ ❌* [${status(current.antiCall)}]
+
 > *❬ ${BOT_NAME} 𝐒𝐄𝐓𝐓𝐈𝐍𝐆  🛠️ ❭*
 
-*💡 Quick Set:* Reply with number (e.g. *1.1*)`;
+*💡 Quick Set:* Reply with number (e.g. *8.1*)`;
 
-            // Logo එක තිබේ නම් Image එක සමඟ Caption ලෙස යැවීම
-            if (fs.existsSync(logoPath)) {
-                return sock.sendMessage(chatJid, { 
-                    image: fs.readFileSync(logoPath), 
-                    caption: menu 
-                }, { quoted: msg });
+            if (logoBuffer) {
+                return sock.sendMessage(chatJid, { image: logoBuffer, caption: menu }, { quoted: msg });
             } else {
                 return sock.sendMessage(chatJid, { text: menu }, { quoted: msg });
             }
         }
 
-        // ==========================================
-        // 2️⃣ Setting එකක් වෙනස් කිරීම (1.1, 2.1 ගැසූ විට)
-        // ==========================================
         const map = {
             '1.1': ['autoSeen', true, 'Auto Status Seen ON ✔️'],
             '1.2': ['autoSeen', false, 'Auto Status Seen OFF ❌'],
@@ -119,7 +112,10 @@ module.exports = {
             '6.2': ['antiViewOnce', false, 'Anti View-Once OFF ❌'],
 
             '7.1': ['alwaysOnline', true, 'Always Online ON ✔️'],
-            '7.2': ['alwaysOnline', false, 'Always Online OFF ❌']
+            '7.2': ['alwaysOnline', false, 'Always Online OFF ❌'],
+
+            '8.1': ['antiCall', true, 'Anti Call ON ✔️'],
+            '8.2': ['antiCall', false, 'Anti Call OFF ❌']
         };
 
         const target = map[action];
@@ -127,10 +123,8 @@ module.exports = {
             return sock.sendMessage(chatJid, { text: '⚠️ Invalid option! Type *.setting* to view menu.' }, { quoted: msg });
         }
 
-        // ⚙️ React එක දැමීම (Setting change වෙද්දී)
-        await sock.sendMessage(chatJid, { react: { text: '⚙️', key: msg.key } });
+        sock.sendMessage(chatJid, { react: { text: '⚙️', key: msg.key } }).catch(() => {});
 
-        // Database & Cache Update කිරීම
         await updateSetting(target[0], target[1]);
 
         if (target[0] === 'alwaysOnline') {
