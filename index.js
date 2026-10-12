@@ -11,6 +11,7 @@ const pino = require('pino');
 const mongoose = require('mongoose');
 const express = require('express');
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const path = require('path');
 
@@ -42,8 +43,26 @@ mongoose.connect(MONGO_URI)
     .catch(err => console.error('❌ DB Error:', err.message));
 
 let sock = null;
+let isStarting = false;
+
+// ⚡ පරණ Socket ගැටුම් සහ RAM Memory පිරීම් ඉවත් කිරීම (Zero Lag & No Conflict)
+function cleanupSocket() {
+    if (sock) {
+        try {
+            sock.ev.removeAllListeners();
+            sock.end(new Error('Clean restart'));
+        } catch (e) {}
+        sock = null;
+    }
+}
 
 async function startBot() {
+    if (isStarting) return;
+    isStarting = true;
+
+    // පෙර තිබූ socket එක සම්පූර්ණයෙන්ම ඉවත් කිරීම
+    cleanupSocket();
+
     if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
 
     const credsPath = path.join(SESSION_DIR, 'creds.json');
@@ -67,6 +86,8 @@ async function startBot() {
         browser: Browsers.ubuntu('Chrome'),
         syncFullHistory: false
     });
+
+    isStarting = false;
 
     // ⚡ Creds Debounce (Database freeze වීම වැළැක්වීම)
     let credsTimeout = null;
@@ -92,15 +113,15 @@ async function startBot() {
     sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
-            console.log(`Connection closed: ${statusCode}`);
+            console.log(`⚠️ Connection closed with status: ${statusCode}`);
 
-            if (statusCode !== DisconnectReason.loggedOut && statusCode !== 401) {
-                setTimeout(startBot, 3000);
-            } else {
+            if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
                 console.log('Session expired. Cleaning up...');
                 if (fs.existsSync(SESSION_DIR)) fs.rmSync(SESSION_DIR, { recursive: true, force: true });
                 await deleteSession('main_session');
-                setTimeout(startBot, 3000);
+                setTimeout(startBot, 4000);
+            } else {
+                setTimeout(startBot, 4000);
             }
         } else if (connection === 'open') {
             console.log(`✅ ${BOT_NAME} Live & Super Fast!`);
@@ -132,6 +153,7 @@ async function startBot() {
 // 🌐 PAIRING WEB PORTAL (COMPLETE UI)
 // ==========================================
 app.get('/', (req, res) => res.redirect('/pair'));
+app.get('/health', (req, res) => res.status(200).send('OK'));
 
 app.get('/pair', (req, res) => {
     res.send(`
@@ -333,11 +355,20 @@ app.get('/api/pair', async (req, res) => {
 });
 
 // ==========================================
-// 🔄 KEEP-ALIVE SELF-PINGER (RENDER SLEEP වැළැක්වීම)
+// 🔄 KEEP-ALIVE SYSTEM (RENDER SLEEP වැළැක්වීම)
 // ==========================================
+// 1. Localhost ping
 setInterval(() => {
-    http.get(`http://localhost:${PORT}/pair`, () => {}).on('error', () => {});
-}, 1000 * 60 * 4); // සෑම විනාඩි 4කට වරක් Server එකම Ping කරගෙන Activeව තබා ගනී
+    http.get(`http://localhost:${PORT}/health`, () => {}).on('error', () => {});
+}, 1000 * 60 * 3);
+
+// 2. Render External URL ping (Render Environment එකක් නම්)
+const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL;
+if (RENDER_EXTERNAL_URL) {
+    setInterval(() => {
+        https.get(`${RENDER_EXTERNAL_URL}/health`, () => {}).on('error', () => {});
+    }, 1000 * 60 * 4);
+}
 
 app.listen(PORT, () => {
     console.log(`🌐 Server running on port ${PORT}`);
