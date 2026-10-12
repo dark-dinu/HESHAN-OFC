@@ -14,9 +14,7 @@ const fs = require('fs');
 const path = require('path');
 
 const { loadSettings } = require('./models/settings');
-const { registerAntiDelete } = require('./handlers/antiDelete');
-const { handleStatus } = require('./handlers/statusHandler');
-const { registerMessageHandler } = require('./handlers/messageHandler');
+const { registerAllHandlers } = require('./handlers'); // ✅ එකම file එක call කිරීම
 const { saveSession, getSession, deleteSession } = require('./auth');
 
 const app = express();
@@ -68,32 +66,34 @@ async function startBot() {
         syncFullHistory: false
     });
 
+    // Creds Debounce (Lag වීම නැති කරයි)
+    let credsTimeout = null;
     sock.ev.on('creds.update', async () => {
         await saveCreds();
-        try {
-            if (fs.existsSync(credsPath)) {
-                const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'), BufferJSON.reviver);
-                await saveSession('main_session', creds);
-            }
-        } catch (e) {}
-    });
-
-    // Register Modules
-    registerAntiDelete(sock, devs);
-    registerMessageHandler(sock, devs, BOT_NAME, devNumbers);
-
-    sock.ev.on('messages.upsert', async ({ messages }) => {
-        for (const msg of messages) {
-            await handleStatus(sock, msg, devs);
+        if (!credsTimeout) {
+            credsTimeout = setTimeout(async () => {
+                try {
+                    if (fs.existsSync(credsPath)) {
+                        const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'), BufferJSON.reviver);
+                        await saveSession('main_session', creds);
+                    }
+                } catch (e) {}
+                credsTimeout = null;
+            }, 10000);
         }
     });
 
+    // 🚀 Handlers Run කිරීම
+    registerAllHandlers(sock, devs, devNumbers, BOT_NAME);
+
+    // Always Online
     sock.ev.on('presence.update', async () => {
         if (global.botSettings?.alwaysOnline) {
             await sock.sendPresenceUpdate('available');
         }
     });
 
+    // Connection Updates
     sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
@@ -108,7 +108,7 @@ async function startBot() {
                 setTimeout(startBot, 3000);
             }
         } else if (connection === 'open') {
-            console.log(`✅ ${BOT_NAME} Successfully Connected!`);
+            console.log(`✅ ${BOT_NAME} Live & Super Fast!`);
             if (global.botSettings?.alwaysOnline) {
                 await sock.sendPresenceUpdate('available');
             }
