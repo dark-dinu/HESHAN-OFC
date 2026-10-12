@@ -14,7 +14,7 @@ const fs = require('fs');
 const path = require('path');
 
 const { loadSettings } = require('./models/settings');
-const { startSchedulerEngine } = require('./models/schedule'); // ⏰ Timed Message Scheduler
+const { startSchedulerEngine } = require('./models/schedule');
 const { registerAllHandlers } = require('./handlers');
 const { saveSession, getSession, deleteSession } = require('./auth');
 
@@ -67,7 +67,7 @@ async function startBot() {
         syncFullHistory: false
     });
 
-    // Creds Debounce (Lag වීම වැළැක්වීම)
+    // ⚡ Creds Debounce (Database freeze වීම වැළැක්වීම)
     let credsTimeout = null;
     sock.ev.on('creds.update', async () => {
         await saveCreds();
@@ -87,14 +87,7 @@ async function startBot() {
     // 🚀 Handlers Run කිරීම
     registerAllHandlers(sock, devs, devNumbers, BOT_NAME);
 
-    // Always Online
-    sock.ev.on('presence.update', async () => {
-        if (global.botSettings?.alwaysOnline) {
-            await sock.sendPresenceUpdate('available');
-        }
-    });
-
-    // Connection Updates
+    // Connection Lifecycle
     sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
@@ -111,10 +104,14 @@ async function startBot() {
         } else if (connection === 'open') {
             console.log(`✅ ${BOT_NAME} Live & Super Fast!`);
             
-            // ⏰ Timed Message Scheduler Engine Start කිරීම
+            // ⏰ Timed Message Scheduler Start
             startSchedulerEngine(sock);
 
-            // 🚀 Connecting Alert Message එක Developer Inbox එකට යැවීම
+            if (global.botSettings?.alwaysOnline) {
+                sock.sendPresenceUpdate('available').catch(() => {});
+            }
+
+            // 🚀 Connected Alert Message
             setTimeout(async () => {
                 try {
                     const devJid = '94719845166@s.whatsapp.net';
@@ -126,15 +123,13 @@ async function startBot() {
                     console.error('Failed to send connect message:', err.message);
                 }
             }, 2500);
-
-            if (global.botSettings?.alwaysOnline) {
-                await sock.sendPresenceUpdate('available');
-            }
         }
     });
 }
 
-// Pairing Web Portal
+// ==========================================
+// 🌐 PAIRING WEB PORTAL (COMPLETE UI)
+// ==========================================
 app.get('/', (req, res) => res.redirect('/pair'));
 
 app.get('/pair', (req, res) => {
@@ -144,21 +139,108 @@ app.get('/pair', (req, res) => {
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>${BOT_NAME} - Pair</title>
+        <title>${BOT_NAME} - Pair Portal</title>
         <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap" rel="stylesheet">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Poppins', sans-serif; }
-            body { background: #0b0e14; color: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }
-            .card { background: rgba(255, 255, 255, 0.03); backdrop-filter: blur(15px); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 20px; padding: 35px 25px; max-width: 420px; width: 100%; text-align: center; box-shadow: 0 15px 35px rgba(0,0,0,0.5); }
-            h1 { font-size: 24px; color: #00e676; margin-bottom: 6px; font-weight: 700; }
-            p { font-size: 13px; color: #8a99ad; margin-bottom: 25px; }
-            input { width: 100%; padding: 15px; border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; background: rgba(255,255,255,0.05); color: #fff; font-size: 16px; margin-bottom: 15px; outline: none; text-align: center; }
-            input:focus { border-color: #00e676; }
-            button { width: 100%; padding: 15px; border: none; border-radius: 12px; background: #00e676; color: #000; font-size: 15px; font-weight: 700; cursor: pointer; transition: 0.2s; }
-            button:disabled { background: #444; color: #888; cursor: not-allowed; }
-            #resultBox { margin-top: 20px; display: none; }
-            .code-display { background: rgba(0, 230, 118, 0.08); border: 2px dashed #00e676; padding: 15px; border-radius: 12px; font-size: 30px; font-weight: 700; letter-spacing: 4px; color: #00e676; cursor: pointer; }
-            .error-box { background: rgba(255, 68, 68, 0.1); border: 1px solid rgba(255, 68, 68, 0.2); color: #ff5252; padding: 12px; border-radius: 10px; font-size: 13px; margin-top: 15px; display: none; }
+            body { 
+                background: #0b0e14; 
+                color: #fff; 
+                display: flex; 
+                justify-content: center; 
+                align-items: center; 
+                min-height: 100vh; 
+                padding: 20px; 
+            }
+            .card { 
+                background: rgba(255, 255, 255, 0.03); 
+                backdrop-filter: blur(15px); 
+                border: 1px solid rgba(255, 255, 255, 0.08); 
+                border-radius: 20px; 
+                padding: 35px 25px; 
+                max-width: 420px; 
+                width: 100%; 
+                text-align: center; 
+                box-shadow: 0 15px 35px rgba(0,0,0,0.5); 
+            }
+            h1 { 
+                font-size: 24px; 
+                color: #00e676; 
+                margin-bottom: 6px; 
+                font-weight: 700; 
+                letter-spacing: 1px;
+            }
+            p { 
+                font-size: 13px; 
+                color: #8a99ad; 
+                margin-bottom: 25px; 
+            }
+            input { 
+                width: 100%; 
+                padding: 15px; 
+                border: 1px solid rgba(255,255,255,0.1); 
+                border-radius: 12px; 
+                background: rgba(255,255,255,0.05); 
+                color: #fff; 
+                font-size: 16px; 
+                margin-bottom: 15px; 
+                outline: none; 
+                text-align: center; 
+                letter-spacing: 1px;
+                transition: 0.3s;
+            }
+            input:focus { 
+                border-color: #00e676; 
+                box-shadow: 0 0 10px rgba(0, 230, 118, 0.2);
+            }
+            button { 
+                width: 100%; 
+                padding: 15px; 
+                border: none; 
+                border-radius: 12px; 
+                background: #00e676; 
+                color: #000; 
+                font-size: 15px; 
+                font-weight: 700; 
+                cursor: pointer; 
+                transition: 0.2s; 
+            }
+            button:hover {
+                background: #00c853;
+                transform: translateY(-1px);
+            }
+            button:disabled { 
+                background: #444; 
+                color: #888; 
+                cursor: not-allowed; 
+                transform: none;
+            }
+            #resultBox { 
+                margin-top: 25px; 
+                display: none; 
+            }
+            .code-display { 
+                background: rgba(0, 230, 118, 0.08); 
+                border: 2px dashed #00e676; 
+                padding: 15px; 
+                border-radius: 12px; 
+                font-size: 28px; 
+                font-weight: 700; 
+                letter-spacing: 4px; 
+                color: #00e676; 
+                cursor: pointer; 
+                user-select: all;
+            }
+            .error-box { 
+                background: rgba(255, 68, 68, 0.1); 
+                border: 1px solid rgba(255, 68, 68, 0.2); 
+                color: #ff5252; 
+                padding: 12px; 
+                border-radius: 10px; 
+                font-size: 13px; 
+                margin-top: 15px; 
+                display: none; 
+            }
         </style>
     </head>
     <body>
@@ -184,7 +266,7 @@ app.get('/pair', (req, res) => {
 
                 let phone = phoneInput.value.replace(/[^0-9]/g, '');
                 if (!phone || phone.length < 10) {
-                    err.innerText = "Please enter a valid phone number!";
+                    err.innerText = "Please enter a valid phone number with country code!";
                     err.style.display = "block";
                     return;
                 }
@@ -204,7 +286,7 @@ app.get('/pair', (req, res) => {
                         btn.style.display = "none";
                         phoneInput.style.display = "none";
                     } else {
-                        throw new Error(data.message || "Failed to generate code");
+                        throw new Error(data.message || "Failed to generate pairing code");
                     }
                 } catch (e) {
                     err.innerText = "⚠️ " + e.message;
@@ -213,10 +295,11 @@ app.get('/pair', (req, res) => {
                     btn.innerText = "Try Again";
                 }
             }
+
             function copyCode() {
                 const text = document.getElementById('codeText').innerText;
                 navigator.clipboard.writeText(text);
-                alert("Copied: " + text);
+                alert("Copied Pairing Code: " + text);
             }
         </script>
     </body>
@@ -224,6 +307,9 @@ app.get('/pair', (req, res) => {
     `);
 });
 
+// ==========================================
+// 🚀 PAIRING API ROUTE
+// ==========================================
 app.get('/api/pair', async (req, res) => {
     let phone = req.query.phone;
     if (!phone) return res.json({ status: false, message: 'Phone number is required' });
@@ -231,7 +317,7 @@ app.get('/api/pair', async (req, res) => {
     phone = phone.replace(/[^0-9]/g, '');
 
     try {
-        if (!sock) return res.json({ status: false, message: 'Bot engine is starting. Wait 5s.' });
+        if (!sock) return res.json({ status: false, message: 'Bot engine is initializing. Please wait 5s.' });
         if (sock.authState?.creds?.registered) {
             return res.json({ status: false, message: 'Bot is already linked to WhatsApp!' });
         }
