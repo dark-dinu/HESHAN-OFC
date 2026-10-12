@@ -4,7 +4,8 @@ const {
     DisconnectReason, 
     delay, 
     makeCacheableSignalKeyStore,
-    Browsers
+    Browsers,
+    BufferJSON
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const mongoose = require('mongoose');
@@ -19,26 +20,28 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-const MONGO_URI = "mongodb+srv://diniduheshan40_db_user:Heshan2007@cluster0.5gazebm.mongodb.net/?appName=Cluster0";
+// Mongo URI පරිසර විචල්‍යයන්ගෙන් (Env) ලබාගැනීම වඩාත් ආරක්ෂිතයි
+const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://diniduheshan40_db_user:Heshan2007@cluster0.5gazebm.mongodb.net/?appName=Cluster0";
 const BOT_NAME = '𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂';
 const devs = ['94719845166@s.whatsapp.net', '15947733680169@s.whatsapp.net'];
 
 global.botSettings = { mode: 'public' };
 
-// Connect Database
+const SESSION_DIR = path.join(__dirname, 'session');
+
+// MongoDB Connection
 mongoose.connect(MONGO_URI)
     .then(() => console.log('✅ MongoDB Connected to 𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂!'))
-    .catch(err => console.log('❌ DB Error:', err));
+    .catch(err => console.error('❌ DB Error:', err.message));
 
 let sock = null;
-let isPairingInProgress = false; // Code එක confirm කරනකල් restart වීම block කරනවා
 
-// Register Bot Commands
-function registerCommands(socket) {
+// Command Engine එක Socket එකට එක් කිරීම
+function attachMessageListener(socket) {
     socket.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
         const msg = messages[0];
-        if (!msg.message) return;
+        if (!msg || !msg.message) return;
 
         const sender = msg.key.remoteJid;
         const isMe = msg.key.fromMe;
@@ -74,9 +77,24 @@ function registerCommands(socket) {
     });
 }
 
-// Start Main Bot Engine
+// Main Bot Engine
 async function startBot() {
-    const { state, saveCreds } = await useMultiFileAuthState('./session');
+    // Session directory පවතින බව තහවුරු කිරීම
+    if (!fs.existsSync(SESSION_DIR)) {
+        fs.mkdirSync(SESSION_DIR, { recursive: true });
+    }
+
+    // Database එකේ ඇති creds.json යථා තත්ත්වයට පත් කිරීම
+    const credsPath = path.join(SESSION_DIR, 'creds.json');
+    if (!fs.existsSync(credsPath)) {
+        const savedCreds = await getSession('main_session');
+        if (savedCreds) {
+            fs.writeFileSync(credsPath, JSON.stringify(savedCreds, BufferJSON.replacer, 2));
+            console.log('🔑 Restored credentials from MongoDB.');
+        }
+    }
+
+    const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
 
     sock = makeWASocket({
         auth: {
@@ -85,16 +103,23 @@ async function startBot() {
         },
         printQRInTerminal: false,
         logger: pino({ level: 'fatal' }),
-        browser: Browsers.ubuntu('Chrome'), // ✅ Chrome Browser identity on Linux
-        defaultQueryTimeoutMs: undefined,
+        browser: Browsers.ubuntu('Chrome'),
+        defaultQueryTimeoutMs: 60000,
         syncFullHistory: false
     });
 
+    // Events Attach කිරීම
+    attachMessageListener(sock);
+
     sock.ev.on('creds.update', async () => {
         await saveCreds();
-        if (fs.existsSync('./session/creds.json')) {
-            const creds = JSON.parse(fs.readFileSync('./session/creds.json', 'utf-8'));
-            await saveSession('main_session', creds);
+        try {
+            if (fs.existsSync(credsPath)) {
+                const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'), BufferJSON.reviver);
+                await saveSession('main_session', creds);
+            }
+        } catch (err) {
+            console.error('Failed to sync creds to DB:', err.message);
         }
     });
 
@@ -103,26 +128,23 @@ async function startBot() {
 
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
-            console.log(`Connection closed with code: ${statusCode}`);
+            console.log(`Connection closed with status: ${statusCode}`);
 
-            // Code එක phone එකට ගහන වෙලාවේ socket restart වෙන්න නොදී lock කර තබයි
-            if (isPairingInProgress) {
-                console.log('⏳ Pairing in progress, waiting for device confirmation...');
-                return;
-            }
+            const shouldReconnect = statusCode !== DisconnectReason.loggedOut && statusCode !== 401;
 
-            if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-                console.log('❌ Logged Out. Clearing session...');
-                if (fs.existsSync('./session')) fs.rmSync('./session', { recursive: true, force: true });
-                await deleteSession('main_session');
+            if (shouldReconnect) {
+                console.log('🔄 Reconnecting in 3 seconds...');
                 setTimeout(startBot, 3000);
             } else {
+                console.log('❌ Logged out or session expired. Resetting session...');
+                if (fs.existsSync(SESSION_DIR)) {
+                    fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+                }
+                await deleteSession('main_session');
                 setTimeout(startBot, 3000);
             }
         } else if (connection === 'open') {
-            console.log(`✅ ${BOT_NAME} Connected & Fully Active!`);
-            isPairingInProgress = false;
-            registerCommands(sock);
+            console.log(`✅ ${BOT_NAME} Successfully Connected to WhatsApp!`);
             try {
                 await sock.sendMessage(devs[0], { text: `🚀 *${BOT_NAME}* Successfully Connected!` });
             } catch (e) {}
@@ -156,7 +178,7 @@ app.get('/pair', (req, res) => {
             button:hover { background: #00c853; }
             button:disabled { background: #444; color: #888; cursor: not-allowed; }
             #resultBox { margin-top: 20px; display: none; }
-            .code-display { background: rgba(0, 230, 118, 0.08); border: 2px dashed #00e676; padding: 15px; border-radius: 12px; font-size: 32px; font-weight: 700; letter-spacing: 5px; color: #00e676; cursor: pointer; }
+            .code-display { background: rgba(0, 230, 118, 0.08); border: 2px dashed #00e676; padding: 15px; border-radius: 12px; font-size: 30px; font-weight: 700; letter-spacing: 4px; color: #00e676; cursor: pointer; }
             .error-box { background: rgba(255, 68, 68, 0.1); border: 1px solid rgba(255, 68, 68, 0.2); color: #ff5252; padding: 12px; border-radius: 10px; font-size: 13px; margin-top: 15px; display: none; }
             .footer { margin-top: 25px; font-size: 11px; color: #556270; }
         </style>
@@ -164,7 +186,7 @@ app.get('/pair', (req, res) => {
     <body>
         <div class="card">
             <h1>${BOT_NAME}</h1>
-            <p>Enter your phone number to pair with Chrome engine</p>
+            <p>Enter your phone number with country code</p>
             
             <input type="text" id="phone" placeholder="94719845166" autocomplete="off">
             <button id="btn" onclick="getCode()">Get Pair Code</button>
@@ -172,12 +194,12 @@ app.get('/pair', (req, res) => {
             <div id="error" class="error-box"></div>
 
             <div id="resultBox">
-                <p style="color: #bbb; margin-bottom: 10px;">Click to copy your code:</p>
+                <p style="color: #bbb; margin-bottom: 10px;">Click code to copy:</p>
                 <div class="code-display" id="codeText" onclick="copyCode()"></div>
-                <p style="font-size: 12px; color: #00e676; margin-top: 10px;">⚡ Enter on WhatsApp now! Linked automatically.</p>
+                <p style="font-size: 12px; color: #00e676; margin-top: 12px;">⚡ Enter code on WhatsApp > Linked Devices!</p>
             </div>
 
-            <div class="footer">© 2026 ${BOT_NAME} • Ultra Fast Pairing</div>
+            <div class="footer">© 2026 ${BOT_NAME} • WhatsApp Web Engine</div>
         </div>
 
         <script>
@@ -190,7 +212,7 @@ app.get('/pair', (req, res) => {
 
                 let phone = phoneInput.value.replace(/[^0-9]/g, '');
                 if (!phone || phone.length < 10) {
-                    err.innerText = "Please enter a valid phone number with country code!";
+                    err.innerText = "Please enter a valid phone number with country code (e.g. 9471XXXXXXX)";
                     err.style.display = "block";
                     return;
                 }
@@ -198,7 +220,7 @@ app.get('/pair', (req, res) => {
                 err.style.display = "none";
                 resBox.style.display = "none";
                 btn.disabled = true;
-                btn.innerText = "Requesting Code...";
+                btn.innerText = "Generating Code...";
 
                 try {
                     const response = await fetch('/api/pair?phone=' + phone);
@@ -223,7 +245,7 @@ app.get('/pair', (req, res) => {
             function copyCode() {
                 const text = document.getElementById('codeText').innerText;
                 navigator.clipboard.writeText(text);
-                alert("Code copied: " + text);
+                alert("Copied: " + text);
             }
         </script>
     </body>
@@ -231,7 +253,7 @@ app.get('/pair', (req, res) => {
     `);
 });
 
-// Single Direct Pairing API
+// Pairing Code Generator API
 app.get('/api/pair', async (req, res) => {
     let phone = req.query.phone;
     if (!phone) return res.json({ status: false, message: 'Phone number is required' });
@@ -240,41 +262,27 @@ app.get('/api/pair', async (req, res) => {
 
     try {
         if (!sock) {
-            return res.json({ status: false, message: 'Bot engine is initializing. Please wait 5s.' });
+            return res.json({ status: false, message: 'Bot engine is starting. Try again in 5s.' });
         }
 
         if (sock.authState?.creds?.registered) {
-            return res.json({ status: false, message: 'Bot is already connected to WhatsApp!' });
+            return res.json({ status: false, message: 'Bot is already linked to WhatsApp!' });
         }
 
-        // Lock socket to prevent auto-restart while user is linking
-        isPairingInProgress = true;
-
+        // WhatsApp වෙතින් Pair Code ලබාගැනීම
+        await delay(1500);
         let code = await sock.requestPairingCode(phone);
         code = code?.match(/.{1,4}/g)?.join('-') || code;
 
-        // Auto release lock after 60s
-        setTimeout(() => { isPairingInProgress = false; }, 60000);
-
         return res.json({ status: true, code });
-
     } catch (err) {
         console.error('Pairing Error:', err);
-        isPairingInProgress = false;
-        return res.json({ status: false, message: 'WhatsApp error. Please try again in 5 seconds.' });
+        return res.json({ status: false, message: err.message || 'Error generating pair code. Please retry.' });
     }
 });
 
-// Server Startup
-app.listen(PORT, async () => {
+// Run Server
+app.listen(PORT, () => {
     console.log(`🌐 Server running on port ${PORT}`);
-    
-    const savedCreds = await getSession('main_session');
-    if (savedCreds) {
-        if (!fs.existsSync('./session')) fs.mkdirSync('./session', { recursive: true });
-        fs.writeFileSync('./session/creds.json', JSON.stringify(savedCreds, null, 2));
-        console.log('🔑 Session found in MongoDB.');
-    }
-    
     startBot();
 });
