@@ -10,6 +10,7 @@ const {
 const pino = require('pino');
 const mongoose = require('mongoose');
 const express = require('express');
+const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
@@ -330,6 +331,13 @@ app.get('/api/pair', async (req, res) => {
         return res.json({ status: false, message: err.message || 'Error requesting pairing code.' });
     }
 });
+
+// ==========================================
+// 🔄 KEEP-ALIVE SELF-PINGER (RENDER SLEEP වැළැක්වීම)
+// ==========================================
+setInterval(() => {
+    http.get(`http://localhost:${PORT}/pair`, () => {}).on('error', () => {});
+}, 1000 * 60 * 4); // සෑම විනාඩි 4කට වරක් Server එකම Ping කරගෙන Activeව තබා ගනී
 
 app.listen(PORT, () => {
     console.log(`🌐 Server running on port ${PORT}`);
