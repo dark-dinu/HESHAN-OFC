@@ -14,7 +14,8 @@ const fs = require('fs');
 const path = require('path');
 
 const { loadSettings } = require('./models/settings');
-const { registerAllHandlers } = require('./handlers'); // ✅ එකම file එක call කිරීම
+const { startSchedulerEngine } = require('./models/schedule'); // ⏰ Timed Message Scheduler
+const { registerAllHandlers } = require('./handlers');
 const { saveSession, getSession, deleteSession } = require('./auth');
 
 const app = express();
@@ -66,7 +67,7 @@ async function startBot() {
         syncFullHistory: false
     });
 
-    // Creds Debounce (Lag වීම නැති කරයි)
+    // Creds Debounce (Lag වීම වැළැක්වීම)
     let credsTimeout = null;
     sock.ev.on('creds.update', async () => {
         await saveCreds();
@@ -109,6 +110,10 @@ async function startBot() {
             }
         } else if (connection === 'open') {
             console.log(`✅ ${BOT_NAME} Live & Super Fast!`);
+            
+            // ⏰ Timed Message Scheduler Engine Start කිරීම
+            startSchedulerEngine(sock);
+
             if (global.botSettings?.alwaysOnline) {
                 await sock.sendPresenceUpdate('available');
             }
