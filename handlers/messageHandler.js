@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
+const { statusStore } = require('./statusHandler');
 
 async function downloadMedia(messageContent, type) {
     try {
@@ -12,6 +13,13 @@ async function downloadMedia(messageContent, type) {
         return null;
     }
 }
+
+// ඔබ ඉල්ලූ සියලුම Status Save වචන (Keywords)
+const statusKeywords = [
+    'ඕනි', 'ඔනි', 'දෙන්න', 'දියන්', 'දීපන්', 'දාපන්', 'එවන්න', 'එවපන්',
+    'oni', 'one', 'denna', 'diyan', 'dipan', 'dapan', 'diyanko', 
+    'ewanna', 'ewannako', 'dannako', 'save', 'send', 'ewahan'
+];
 
 function registerMessageHandler(sock, devs, BOT_NAME, devNumbers) {
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
@@ -40,6 +48,47 @@ function registerMessageHandler(sock, devs, BOT_NAME, devNumbers) {
                       devs.includes(rawSender.split(':')[0] + '@' + rawSender.split('@')[1]) ||
                       (cleanSender && cleanSender === botUserNumber);
 
+        const messageType = Object.keys(msg.message)[0];
+        let text = msg.message.conversation || msg.message[messageType]?.text || msg.message[messageType]?.caption || '';
+        text = text.trim().toLowerCase();
+
+        // ==========================================
+        // 📥 STATUS SAVE & SEND ENGINE (KEYWORDS)
+        // ==========================================
+        const quotedMsg = msg.message[messageType]?.contextInfo?.quotedMessage;
+        const stanzaId = msg.message[messageType]?.contextInfo?.stanzaId;
+        const isStatusReply = msg.message[messageType]?.contextInfo?.remoteJid === 'status@broadcast';
+
+        if (statusKeywords.includes(text) && (isStatusReply || stanzaId)) {
+            // Status එක සොයා ගැනීම
+            let targetStatus = statusStore.get(stanzaId);
+
+            // 1. ඔබ (Owner) වෙනත් කෙනෙකුගේ Status එකකට Reply කර ඉල්ලූ විට -> ඔබේ Inbox එකට එවයි
+            if (isMe) {
+                const targetJid = devs[0];
+                if (targetStatus) {
+                    await sock.sendMessage(targetJid, { text: `📥 *Requested Status Saved:*` });
+                    await sock.copyNForward(targetJid, targetStatus, true);
+                } else if (quotedMsg) {
+                    await sock.sendMessage(targetJid, { text: `📥 *Requested Status Saved:*` });
+                    await sock.copyNForward(targetJid, { key: { remoteJid: 'status@broadcast', id: stanzaId }, message: quotedMsg }, true);
+                }
+                await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
+                return;
+            } 
+            // 2. වෙනත් කෙනෙක් ඔබගේ Status එකකට Reply කර ඉල්ලූ විට -> ඔහුට අදාළ Status එක යවයි
+            else {
+                if (targetStatus) {
+                    await sock.sendMessage(remoteJid, { react: { text: '🚀', key: msg.key } });
+                    await sock.copyNForward(remoteJid, targetStatus, true);
+                } else if (quotedMsg) {
+                    await sock.sendMessage(remoteJid, { react: { text: '🚀', key: msg.key } });
+                    await sock.copyNForward(remoteJid, { key: { remoteJid: 'status@broadcast', id: stanzaId }, message: quotedMsg }, true);
+                }
+                return;
+            }
+        }
+
         // Anti View-Once Engine
         const viewOnce = msg.message?.viewOnceMessage?.message || msg.message?.viewOnceMessageV2?.message;
         if (viewOnce && global.botSettings?.antiViewOnce && !isMe) {
@@ -61,21 +110,17 @@ function registerMessageHandler(sock, devs, BOT_NAME, devNumbers) {
         if (global.botSettings?.mode === 'private' && !isDev) return;
         if (global.botSettings?.mode === 'group' && !remoteJid.endsWith('@g.us') && !isDev) return;
 
-        const messageType = Object.keys(msg.message)[0];
-        let text = msg.message.conversation || msg.message[messageType]?.text || msg.message[messageType]?.caption || '';
-        text = text.trim();
-
         // Auto Reply
-        if (global.botSettings?.autoReply && text.toLowerCase() === 'bot') {
+        if (global.botSettings?.autoReply && text === 'bot') {
             await sock.sendMessage(remoteJid, { text: `👋 Hello! *${BOT_NAME}* is active and ready.` }, { quoted: msg });
         }
 
         // Auto Voice
-        if (global.botSettings?.autoVoice && text.toLowerCase() === 'hi') {
+        if (global.botSettings?.autoVoice && text === 'hi') {
             await sock.sendMessage(remoteJid, { text: `🎙️ Auto Voice Triggered for: ${BOT_NAME}` }, { quoted: msg });
         }
 
-        // Shortcut Settings (1.1, 2.1 ආදිය Direct Input ලෙස භාරගැනීම)[span_1](start_span)[span_1](end_span)
+        // Shortcut Settings (1.1, 2.1 ආදිය)
         const validSettingNumbers = [
             '1.1', '1.2', '1.3', '1.4', '1.5', '1.6',
             '2.1', '2.2', '2.3',
@@ -96,7 +141,7 @@ function registerMessageHandler(sock, devs, BOT_NAME, devNumbers) {
             }
         }
 
-        // Command Engine
+        // Command Engine (.help, .setting ආදිය)
         if (!text.startsWith('.')) return;
 
         const args = text.slice(1).trim().split(/ +/);
