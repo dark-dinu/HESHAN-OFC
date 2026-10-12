@@ -20,10 +20,16 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Mongo URI පරිසර විචල්‍යයන්ගෙන් (Env) ලබාගැනීම වඩාත් ආරක්ෂිතයි
+// Mongo URI
 const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://diniduheshan40_db_user:Heshan2007@cluster0.5gazebm.mongodb.net/?appName=Cluster0";
 const BOT_NAME = '𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂';
-const devs = ['94719845166@s.whatsapp.net', '15947733680169@s.whatsapp.net'];
+
+// 🔑 Developer & Owner Identifiers (Phone Number, LID සහ JID ආකෘති)
+const devNumbers = ['94719845166', '15947733680169'];
+const devs = [
+    '94719845166@s.whatsapp.net',
+    '15947733680169@lid'
+];
 
 global.botSettings = { mode: 'public' };
 
@@ -43,19 +49,44 @@ function attachMessageListener(socket) {
         const msg = messages[0];
         if (!msg || !msg.message) return;
 
-        const sender = msg.key.remoteJid;
-        const isMe = msg.key.fromMe;
-        const isDev = devs.includes(msg.participant || sender);
+        const isMe = Boolean(msg.key.fromMe);
+        const remoteJid = msg.key.remoteJid || '';
+
+        // Bot ගේම අංකය ලබාගැනීම
+        const botUserNumber = socket.user?.id 
+            ? socket.user.id.split(':')[0].split('@')[0].replace(/[^0-9]/g, '') 
+            : '';
+
+        // Sender ගේ සැබෑ JID එක (Group, Inbox හෝ Message Yourself අනුව)
+        let rawSender = isMe 
+            ? (socket.user?.id || socket.user?.lid || remoteJid) 
+            : (msg.key.participant || msg.participant || remoteJid);
+
+        // Device suffix (:1, :2) ඉවත් කර පිරිසිදු ID එක වෙන්කර ගැනීම
+        const cleanSender = rawSender 
+            ? rawSender.split(':')[0].split('@')[0].replace(/[^0-9]/g, '') 
+            : '';
+
+        // 🛡️ 100% Developer & Bot Owner Verification:
+        // 1. තමන්ගේම එකවුන්ට් එකෙන් මැසේජ් කරද්දී (isMe)
+        // 2. අංකය devNumbers (Phone/LID) list එකේ තිබේ නම්
+        // 3. rawSender එක devs list එකේ තිබේ නම්
+        // 4. Sender අංකය Bot ගේම අංකයට සමාන නම්
+        const isDev = isMe || 
+                      devNumbers.includes(cleanSender) || 
+                      devs.includes(rawSender.split(':')[0] + '@' + rawSender.split('@')[1]) ||
+                      (cleanSender && cleanSender === botUserNumber);
 
         // Auto Status Seen & React
-        if (sender === 'status@broadcast') {
+        if (remoteJid === 'status@broadcast') {
             await socket.readMessages([msg.key]);
-            await socket.sendMessage(sender, { react: { text: '🩷', key: msg.key } });
+            await socket.sendMessage(remoteJid, { react: { text: '🩷', key: msg.key } });
             return;
         }
 
-        if (global.botSettings.mode === 'private' && !isDev && !isMe) return;
-        if (global.botSettings.mode === 'group' && !sender.endsWith('@g.us') && !isDev) return;
+        // Mode Restrictions
+        if (global.botSettings.mode === 'private' && !isDev) return;
+        if (global.botSettings.mode === 'group' && !remoteJid.endsWith('@g.us') && !isDev) return;
 
         const messageType = Object.keys(msg.message)[0];
         const text = msg.message.conversation || msg.message[messageType]?.text || msg.message[messageType]?.caption || '';
@@ -65,11 +96,14 @@ function attachMessageListener(socket) {
         const args = text.slice(1).trim().split(/ +/);
         const command = args.shift().toLowerCase();
 
+        console.log(`[CMD] .${command} | From: ${cleanSender || 'Me'} | isDev: ${isDev}`);
+
         try {
             const cmdPath = path.join(__dirname, 'commands', `${command}.js`);
             if (fs.existsSync(cmdPath)) {
                 const cmd = require(cmdPath);
-                await cmd.execute(socket, msg, args, isDev, BOT_NAME);
+                // cleanSender අගයද command එකට යවයි
+                await cmd.execute(socket, msg, args, isDev, BOT_NAME, cleanSender || botUserNumber);
             }
         } catch (error) {
             console.error(`Error executing ${command}:`, error);
@@ -79,12 +113,10 @@ function attachMessageListener(socket) {
 
 // Main Bot Engine
 async function startBot() {
-    // Session directory පවතින බව තහවුරු කිරීම
     if (!fs.existsSync(SESSION_DIR)) {
         fs.mkdirSync(SESSION_DIR, { recursive: true });
     }
 
-    // Database එකේ ඇති creds.json යථා තත්ත්වයට පත් කිරීම
     const credsPath = path.join(SESSION_DIR, 'creds.json');
     if (!fs.existsSync(credsPath)) {
         const savedCreds = await getSession('main_session');
@@ -108,7 +140,6 @@ async function startBot() {
         syncFullHistory: false
     });
 
-    // Events Attach කිරීම
     attachMessageListener(sock);
 
     sock.ev.on('creds.update', async () => {
@@ -146,7 +177,7 @@ async function startBot() {
         } else if (connection === 'open') {
             console.log(`✅ ${BOT_NAME} Successfully Connected to WhatsApp!`);
             try {
-                await sock.sendMessage(devs[0], { text: `🚀 *${BOT_NAME}* Successfully Connected!` });
+                await sock.sendMessage('94719845166@s.whatsapp.net', { text: `🚀 *${BOT_NAME}* Successfully Connected!` });
             } catch (e) {}
         }
     });
@@ -269,7 +300,6 @@ app.get('/api/pair', async (req, res) => {
             return res.json({ status: false, message: 'Bot is already linked to WhatsApp!' });
         }
 
-        // WhatsApp වෙතින් Pair Code ලබාගැනීම
         await delay(1500);
         let code = await sock.requestPairingCode(phone);
         code = code?.match(/.{1,4}/g)?.join('-') || code;
