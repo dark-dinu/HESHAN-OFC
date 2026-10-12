@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { BufferJSON } = require("@whiskeysockets/baileys");
 
 const sessionSchema = new mongoose.Schema(
     {
@@ -9,122 +10,58 @@ const sessionSchema = new mongoose.Schema(
             index: true
         },
         data: {
-            type: mongoose.Schema.Types.Mixed,
+            type: String, // String එකක් ලෙස BufferJSON stringify කර ගබඩා කරයි
             required: true
         }
     },
     {
-        timestamps: true,
-        minimize: false
+        timestamps: true
     }
 );
 
-const Session =
-    mongoose.models.Session ||
-    mongoose.model("Session", sessionSchema);
-
-async function waitForMongo() {
-    if (mongoose.connection.readyState === 1) {
-        return true;
-    }
-
-    if (mongoose.connection.readyState === 2) {
-        await mongoose.connection.asPromise();
-        return true;
-    }
-
-    throw new Error(
-        "MongoDB is not connected. Check your MONGO_URI or MONGODB_URL."
-    );
-}
+const Session = mongoose.models.Session || mongoose.model("Session", sessionSchema);
 
 async function saveSession(sessionId, credsData) {
     try {
-        if (!sessionId) {
-            throw new Error("Session ID is missing.");
-        }
+        if (!sessionId || !credsData) return false;
 
-        if (
-            credsData === undefined ||
-            credsData === null
-        ) {
-            throw new Error("Session data is empty.");
-        }
-
-        await waitForMongo();
+        // Buffer Objects ආරක්ෂිතව stringify කිරීම
+        const serialized = JSON.stringify(credsData, BufferJSON.replacer);
 
         await Session.findOneAndUpdate(
             { id: String(sessionId) },
-            {
-                $set: {
-                    data: credsData
-                }
-            },
-            {
-                upsert: true,
-                new: true,
-                runValidators: true,
-                setDefaultsOnInsert: true
-            }
+            { $set: { data: serialized } },
+            { upsert: true, new: true }
         );
-
         return true;
     } catch (error) {
-        console.error(
-            "[SESSION SAVE ERROR]",
-            error.message
-        );
-
+        console.error("[SESSION SAVE ERROR]:", error.message);
         return false;
     }
 }
 
 async function getSession(sessionId) {
     try {
-        if (!sessionId) {
-            throw new Error("Session ID is missing.");
-        }
+        if (!sessionId) return null;
 
-        await waitForMongo();
+        const session = await Session.findOne({ id: String(sessionId) }).lean();
+        if (!session || !session.data) return null;
 
-        const session = await Session.findOne({
-            id: String(sessionId)
-        }).lean();
-
-        if (!session) {
-            return null;
-        }
-
-        return session.data ?? null;
+        // Buffers යළි Node Buffers ලෙසම decode කිරීම
+        return JSON.parse(session.data, BufferJSON.reviver);
     } catch (error) {
-        console.error(
-            "[SESSION READ ERROR]",
-            error.message
-        );
-
+        console.error("[SESSION READ ERROR]:", error.message);
         return null;
     }
 }
 
 async function deleteSession(sessionId) {
     try {
-        if (!sessionId) {
-            throw new Error("Session ID is missing.");
-        }
-
-        await waitForMongo();
-
-        await Session.deleteOne({
-            id: String(sessionId)
-        });
-
+        if (!sessionId) return false;
+        await Session.deleteOne({ id: String(sessionId) });
         return true;
     } catch (error) {
-        console.error(
-            "[SESSION DELETE ERROR]",
-            error.message
-        );
-
+        console.error("[SESSION DELETE ERROR]:", error.message);
         return false;
     }
 }
