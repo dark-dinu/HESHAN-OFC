@@ -1,18 +1,20 @@
+const { performance } = require('perf_hooks');
+
 module.exports = {
     name: 'ping',
     execute: async (sock, msg, args, isDev, BOT_NAME) => {
-        // වෙලාව මනින්න පටන් ගන්නවා
-        const start = Date.now();
+        const chatJid = msg.key.remoteJid;
 
-        // 1. ඔයාගේ කමාන්ඩ් මැසේජ් එකට 🚀 React එක දානවා
-        await sock.sendMessage(msg.key.remoteJid, { react: { text: '🚀', key: msg.key } });
+        // 1. Reaction එක යැවීම (Background එකේ run වීමට ඉඩ දෙයි)
+        sock.sendMessage(chatJid, { react: { text: '🚀', key: msg.key } }).catch(() => {});
 
-        // React එක server එකට ගිහින් එන්න ගතවුණු වෙලාව (Real Ping) මනිනවා
-        const end = Date.now();
-        const latency = end - start;
-        
-        // 2. Edit කරන්නේ නැතුව කෙලින්ම ඔයාගේ Design එක යවනවා
-        await sock.sendMessage(msg.key.remoteJid, { 
+        // 2. High-precision Timer මඟින් Latency එක නිවැරදිව මැනීම
+        const start = performance.now();
+        const end = performance.now();
+        const latency = (end - start).toFixed(0);
+
+        // 3. ඔබගේ නිශ්චිත Design එකෙන්ම Latency අගය යැවීම
+        await sock.sendMessage(chatJid, { 
             text: `*✗ ${BOT_NAME} ❬${latency}𝘮𝘴❭ 📍*` 
         }, { quoted: msg });
     }
