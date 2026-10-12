@@ -22,6 +22,7 @@ module.exports = {
         const action = args[0]?.toLowerCase();
         const current = global.botSettings;
         const status = (val) => val ? '✔️' : '❌';
+        const currentDest = (current.antiSendDest || 'me').toUpperCase();
 
         if (!action) {
             sock.sendMessage(chatJid, { react: { text: '🛠️', key: msg.key } }).catch(() => {});
@@ -76,9 +77,15 @@ module.exports = {
 *8.1  ➥ ᴏɴ ✔️*
 *8.2  ➥ ᴏꜰꜰ ❌* [${status(current.antiCall)}]
 
+9️⃣ *𝐀𝐍𝐓𝐈 𝐒𝐄𝐍𝐃 𝐓𝐀𝐑𝐆𝐄𝐓 🎯*
+_(Anti Delete & Anti View-Once Destination)_
+
+*9.1  ➥  ᴍᴇ 👤 (Private Inbox)*
+*9.2  ➥  ꜰʀᴏᴍ 👥 (Current Chat)* [${currentDest}]
+
 > *❬ ${BOT_NAME} 𝐒𝐄𝐓𝐓𝐈𝐍𝐆  🛠️ ❭*
 
-*💡 Quick Set:* Reply with number (e.g. *8.1*)`;
+*💡 Quick Set:* Reply with number (e.g. *9.1*)`;
 
             if (logoBuffer) {
                 return sock.sendMessage(chatJid, { image: logoBuffer, caption: menu }, { quoted: msg });
@@ -115,7 +122,10 @@ module.exports = {
             '7.2': ['alwaysOnline', false, 'Always Online OFF ❌'],
 
             '8.1': ['antiCall', true, 'Anti Call ON ✔️'],
-            '8.2': ['antiCall', false, 'Anti Call OFF ❌']
+            '8.2': ['antiCall', false, 'Anti Call OFF ❌'],
+
+            '9.1': ['antiSendDest', 'me', 'Anti Send Target: ME 👤 (Private Inbox)'],
+            '9.2': ['antiSendDest', 'from', 'Anti Send Target: FROM 👥 (Current Chat)']
         };
 
         const target = map[action];
