@@ -1,9 +1,8 @@
 const { Schedule, getSLTime } = require('../models/schedule');
 
-// Time format (HH:mm) නිවැරදි කරගැනීම
 function parseTime(str) {
     if (!str) return null;
-    const match = str.trim().match(/^(\d{1,2}):(\d{2})$/);
+    const match = str.trim().match(/^(\d{1,2})\s*[:.]\s*(\d{2})$/);
     if (!match) return null;
     let h = match[1].padStart(2, '0');
     let m = match[2];
@@ -16,14 +15,13 @@ module.exports = {
     execute: async (sock, msg, args, isDev, BOT_NAME) => {
         const chatJid = msg.key.remoteJid;
 
-        // 🔒 Only Bot Owner / Developer
         if (!isDev) {
             return sock.sendMessage(chatJid, { text: '❌ Only Bot Owner/Developer can schedule messages!' }, { quoted: msg });
         }
 
         const input = args.join(' ').trim();
 
-        // 📋 1. .time list (Chat Schedules)
+        // 📋 1. .time list
         if (input.toLowerCase() === 'list') {
             const list = await Schedule.find({ type: 'chat' });
             if (list.length === 0) {
@@ -36,11 +34,11 @@ module.exports = {
                 text += `   🕒 *Time:* \`${item.time}\` (24h)\n`;
                 text += `   💬 *Message:* ${item.message}\n\n`;
             });
-            text += `💡 *To Delete:* .deltime <number>,<message>,<time> හෝ .deltime 1`;
+            text += `💡 *To Delete:* .deltime 1`;
             return sock.sendMessage(chatJid, { text }, { quoted: msg });
         }
 
-        // 📢 2. .time channel list (Channel Schedules)
+        // 📢 2. .time channel list
         if (input.toLowerCase() === 'channel list') {
             const list = await Schedule.find({ type: 'channel' });
             if (list.length === 0) {
@@ -57,9 +55,8 @@ module.exports = {
             return sock.sendMessage(chatJid, { text }, { quoted: msg });
         }
 
-        // 📢 3. CHANNEL SCHEDULE (.time channel,...)
+        // 📢 3. Channel Schedule (.time channel,...)
         if (input.toLowerCase().startsWith('channel')) {
-            // "channel" වචනය ඉවත් කර ඉතිරි කොටස ගැනීම
             let cleanInput = input.replace(/^channel[\s,]*/i, '');
             const rawParts = cleanInput.split(',');
 
@@ -69,31 +66,18 @@ module.exports = {
 
             if (rawParts.length >= 2) {
                 target = rawParts[0].trim();
-                
-                // මැද time එක ඇත්නම් (e.g. channel,link,15:20,message)
                 if (parseTime(rawParts[1])) {
                     time = parseTime(rawParts[1]);
                     message = rawParts.slice(2).join(',').trim();
-                } 
-                // අග time එක ඇත්නම් (e.g. channel,link,message,15:20)
-                else if (parseTime(rawParts[rawParts.length - 1])) {
+                } else if (parseTime(rawParts[rawParts.length - 1])) {
                     time = parseTime(rawParts[rawParts.length - 1]);
                     message = rawParts.slice(1, -1).join(',').trim();
-                }
-                // comma නැතිව space වලින් time එක තිබුණොත් (e.g. channel,link,15:20 message)
-                else {
-                    const secondPart = rawParts.slice(1).join(',').trim();
-                    const words = secondPart.split(/\s+/);
-                    if (parseTime(words[0])) {
-                        time = parseTime(words[0]);
-                        message = words.slice(1).join(' ').trim();
-                    }
                 }
             }
 
             if (!target || !time || !message) {
                 return sock.sendMessage(chatJid, { 
-                    text: `⚠️ *Invalid Channel Format!*\n\n*Usage:*\n.time channel,<link/jid>,<time>,<message>\n\n*Example:*\n.time channel,https://whatsapp.com/channel/xxx,15:20,Good Afternoon Everyone! 🔥` 
+                    text: `⚠️ *Channel Format:*\n.time channel,<link/jid>,<time>,<message>\n\n*Example:*\n.time channel,https://whatsapp.com/channel/xxx,15:20,Good Afternoon Everyone! 🔥` 
                 }, { quoted: msg });
             }
 
@@ -105,7 +89,7 @@ module.exports = {
             }, { quoted: msg });
         }
 
-        // 💬 4. CHAT SCHEDULE (.time 94705836838,මොකද කරන්නෙ..🤭,15:20)
+        // 💬 4. Chat Schedule (.time 94705836838,මොකද කරන්නෙ..🤭,15:20)
         const parts = input.split(',');
         if (parts.length < 3) {
             return sock.sendMessage(chatJid, { 
@@ -122,20 +106,17 @@ module.exports = {
         let time = null;
         let message = '';
 
-        // Time එක අගට ඇත්නම් (.time number,message,time)
         if (parseTime(parts[parts.length - 1])) {
             time = parseTime(parts[parts.length - 1]);
             message = parts.slice(1, -1).join(',').trim();
-        } 
-        // Time එක මැදට ඇත්නම් (.time number,time,message)
-        else if (parseTime(parts[1])) {
+        } else if (parseTime(parts[1])) {
             time = parseTime(parts[1]);
             message = parts.slice(2).join(',').trim();
         }
 
         if (!time || !message) {
             return sock.sendMessage(chatJid, { 
-                text: `⚠️ *Invalid Time!*\nTime format must be 24-hour HH:mm (e.g. 15:20 or 09:30).` 
+                text: `⚠️ *Invalid Time!* Time format must be 24-hour HH:mm (e.g. 15:20 or 09:30).` 
             }, { quoted: msg });
         }
 
