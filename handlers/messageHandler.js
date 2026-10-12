@@ -21,11 +21,25 @@ function registerMessageHandler(sock, devs, BOT_NAME) {
 
         const sender = msg.key.remoteJid;
         const isMe = msg.key.fromMe;
-        const rawSender = isMe ? sock.user.id : (msg.key.participant || sender);
-        const cleanSender = rawSender.split(':')[0].split('@')[0].replace(/[^0-9]/g, '');
-        const isDev = isMe || devs.includes(cleanSender);
 
-        // 6. ANTI VIEW-ONCE ENGINE (Photo/Video අහුවූ විට Dev Inbox එකට එවයි)
+        // Bot ගේම Phone Number එක ලබාගැනීම
+        const botNumber = sock.user?.id ? sock.user.id.split(':')[0].split('@')[0].replace(/[^0-9]/g, '') : '';
+
+        // Sender ගේ JID එක නිවැරදිව ලබාගැනීම
+        const rawSender = isMe 
+            ? sock.user.id 
+            : (msg.key.participant || msg.participant || sender);
+
+        // :1, :2 වැනි Device IDs ඉවත් කර පිරිසිදු අංකය ලබාගැනීම
+        const cleanSender = rawSender.split(':')[0].split('@')[0].replace(/[^0-9]/g, '');
+
+        // 🔑 Developer Check:
+        // 1. Bot run වන SIM එකෙන්ම command ගැසුවා නම් (isMe)
+        // 2. Sender number එක Bot number එකට සමාන නම්
+        // 3. devs array එකේ ඇති number එකකට සමාන නම්
+        const isDev = isMe || (cleanSender === botNumber) || devs.includes(cleanSender);
+
+        // 6. ANTI VIEW-ONCE ENGINE
         const viewOnce = msg.message?.viewOnceMessage?.message || msg.message?.viewOnceMessageV2?.message;
         if (viewOnce && global.botSettings?.antiViewOnce && !isMe) {
             const mType = Object.keys(viewOnce)[0];
@@ -42,7 +56,7 @@ function registerMessageHandler(sock, devs, BOT_NAME) {
             }
         }
 
-        // 2. MODE CHECK (Private / Group / Public)
+        // 2. MODE CHECK
         if (global.botSettings?.mode === 'private' && !isDev) return;
         if (global.botSettings?.mode === 'group' && !sender.endsWith('@g.us') && !isDev) return;
 
@@ -54,7 +68,7 @@ function registerMessageHandler(sock, devs, BOT_NAME) {
             await sock.sendMessage(sender, { text: `👋 Hello! I am *${BOT_NAME}*, ready to help.` }, { quoted: msg });
         }
 
-        // 3. AUTO VOICE (Voice message එකක් ලෙස text එකක් යැවීම)
+        // 3. AUTO VOICE
         if (global.botSettings?.autoVoice && text.toLowerCase().trim() === 'hi') {
             await sock.sendMessage(sender, { text: `🎙️ Auto Voice Triggered for: ${BOT_NAME}` }, { quoted: msg });
         }
@@ -64,11 +78,15 @@ function registerMessageHandler(sock, devs, BOT_NAME) {
             const args = text.slice(1).trim().split(/ +/);
             const command = args.shift().toLowerCase();
 
+            // Terminal Debug: Bot එකට ලැබෙන sender number එක Console එකේ print කරයි
+            console.log(`[COMMAND] .${command} | Sender: ${cleanSender} | isDev: ${isDev}`);
+
             try {
                 const cmdPath = path.join(__dirname, '../commands', `${command}.js`);
                 if (fs.existsSync(cmdPath)) {
                     const cmd = require(cmdPath);
-                    await cmd.execute(sock, msg, args, isDev, BOT_NAME);
+                    // cleanSender අගයද command එකට යවයි (Debug පහසුව සඳහා)
+                    await cmd.execute(sock, msg, args, isDev, BOT_NAME, cleanSender);
                 }
             } catch (err) {
                 console.error(`Error in [${command}]:`, err);
