@@ -59,7 +59,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
                 sock.readMessages([msg.key]).catch(() => {});
             }
             if (global.botSettings?.autoReact) {
-                sock.sendMessage('status@broadcast', { react: { text: '💚', key: msg.key } }).catch(() => {});
+                sock.sendMessage('status@broadcast', { react: { text: '😼', key: msg.key } }).catch(() => {});
             }
             return;
         }
@@ -131,7 +131,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
 
             if (target) {
                 if (target.videoMessage) {
-                    sock.sendMessage(remoteJid, { react: { text: '⏳', key: msg.key } }).catch(() => {});
+                    sock.sendMessage(remoteJid, { react: { text: 'ᴏɴɴ', key: msg.key } }).catch(() => {});
                     const buffer = await downloadMedia(target.videoMessage, 'video');
                     if (buffer) {
                         await sock.sendMessage(remoteJid, { video: buffer, caption: target.videoMessage.caption || `📥 *Status Saved by ${BOT_NAME}*` }, { quoted: msg });
