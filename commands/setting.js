@@ -2,11 +2,14 @@ const { updateSetting } = require('../models/settings');
 
 module.exports = {
     name: 'setting',
-    execute: async (sock, msg, args, isDev, BOT_NAME) => {
+    execute: async (sock, msg, args, isDev, BOT_NAME, cleanSender) => {
         const chatJid = msg.key.remoteJid;
 
+        // Developer නොවේ නම් Sender Number එක සහිතව Error එක එවයි
         if (!isDev) {
-            return sock.sendMessage(chatJid, { text: '❌ Only Developers can change settings!' }, { quoted: msg });
+            return sock.sendMessage(chatJid, { 
+                text: `❌ *Only Developers can change settings!*\n\n📱 *Your Detected ID:* \`${cleanSender}\`\n\n💡 _මේ අංකය index.js එකේ devs array එකට ඇතුළත් කරන්න._` 
+            }, { quoted: msg });
         }
 
         const action = args[0]?.toLowerCase();
@@ -101,7 +104,6 @@ module.exports = {
 
         await updateSetting(target[0], target[1]);
 
-        // Always Online toggle වුවහොත් ක්ෂණිකව apply කිරීම
         if (target[0] === 'alwaysOnline') {
             await sock.sendPresenceUpdate(target[1] ? 'available' : 'unavailable');
         }
