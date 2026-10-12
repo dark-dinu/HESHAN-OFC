@@ -9,8 +9,8 @@ const settingsSchema = new mongoose.Schema({
     autoVoice: { type: Boolean, default: false },
     autoReply: { type: Boolean, default: false },
     antiDelete: { type: Boolean, default: true },
-    antiDeleteDest: { type: String, default: 'me' }, // 🎯 'me' (Private Inbox) හෝ 'from' (Current Chat)
     antiViewOnce: { type: Boolean, default: true },
+    antiSendDest: { type: String, default: 'me' }, // 🎯 'me' (Private Inbox) හෝ 'from' (Current Chat)
     alwaysOnline: { type: Boolean, default: false },
     antiCall: { type: Boolean, default: true }
 }, { timestamps: true });
@@ -25,8 +25,8 @@ global.botSettings = {
     autoVoice: false,
     autoReply: false,
     antiDelete: true,
-    antiDeleteDest: 'me',
     antiViewOnce: true,
+    antiSendDest: 'me',
     alwaysOnline: false,
     antiCall: true
 };
