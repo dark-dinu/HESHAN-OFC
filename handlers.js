@@ -2,12 +2,28 @@ const fs = require('fs');
 const path = require('path');
 const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
 
-// RAM එක ආරක්ෂා කරන Lightweight Caches
+// Commands Pre-loading
+const commands = new Map();
+const commandsDir = path.join(__dirname, 'commands');
+
+if (fs.existsSync(commandsDir)) {
+    fs.readdirSync(commandsDir).forEach(file => {
+        if (file.endsWith('.js')) {
+            try {
+                const cmd = require(path.join(commandsDir, file));
+                if (cmd.name) commands.set(cmd.name.toLowerCase(), cmd);
+            } catch (e) {
+                console.error(`Failed to preload command ${file}:`, e.message);
+            }
+        }
+    });
+    console.log(`⚡ [ENGINE] Pre-loaded ${commands.size} commands into RAM!`);
+}
+
 const messageStore = new Map();
 const statusStore = new Map();
-const MAX_CACHE_SIZE = 50;
+const MAX_CACHE_SIZE = 40;
 
-// Super Fast Media Stream Downloader
 async function downloadMedia(content, type) {
     try {
         if (!content) return null;
@@ -34,12 +50,50 @@ const validSettingNumbers = [
     '4.1', '4.2',
     '5.1', '5.2',
     '6.1', '6.2',
-    '7.1', '7.2'
+    '7.1', '7.2',
+    '8.1', '8.2' // 📞 Anti Call Shortcuts
 ];
+
+const ANTI_CALL_AUDIO = 'https://files.catbox.moe/osl5lm.ogg';
 
 function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
 
-    // 1️⃣ FAST MESSAGES UPSERT HANDLER
+    // ==============================================================
+    // 📞 1. ANTI-CALL ENGINE (AUTO-REJECT & SEND VOICE NOTE)
+    // ==============================================================
+    sock.ev.on('call', async (callEvents) => {
+        if (!global.botSettings?.antiCall) return;
+
+        for (const call of callEvents) {
+            if (call.status === 'offer') {
+                const callerJid = call.from;
+                const cleanCaller = callerJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+
+                // Developer කෙනෙක් නම් Call Reject නොකරයි
+                if (devNumbers.includes(cleanCaller) || devs.includes(callerJid)) continue;
+
+                try {
+                    // Call එක Reject (Cut) කිරීම
+                    await sock.rejectCall(call.id, call.from);
+                    console.log(`🚫 [ANTI-CALL] Rejected call from: ${cleanCaller}`);
+
+                    // අදාළ Caller ට Voice Note එක යැවීම
+                    await sock.sendMessage(callerJid, {
+                        audio: { url: ANTI_CALL_AUDIO },
+                        mimetype: 'audio/mp4',
+                        ptt: true
+                    });
+                    console.log(`🎙️ [ANTI-CALL] Voice note sent to: ${cleanCaller}`);
+                } catch (err) {
+                    console.error('[ANTI-CALL ERROR]:', err.message);
+                }
+            }
+        }
+    });
+
+    // ==============================================================
+    // 2. MESSAGES UPSERT (Status, Commands, Anti View-Once)
+    // ==============================================================
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify' && type !== 'append') return;
         const msg = messages[0];
@@ -50,30 +104,18 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         // Status Handler
         if (remoteJid === 'status@broadcast') {
             if (msg.key?.id) {
-                if (statusStore.size >= MAX_CACHE_SIZE) {
-                    statusStore.delete(statusStore.keys().next().value);
-                }
+                if (statusStore.size >= MAX_CACHE_SIZE) statusStore.delete(statusStore.keys().next().value);
                 statusStore.set(msg.key.id, msg);
             }
-            if (global.botSettings?.autoSeen) {
-                sock.readMessages([msg.key]).catch(() => {});
-            }
-            if (global.botSettings?.autoReact) {
-                sock.sendMessage('status@broadcast', { react: { text: '😼', key: msg.key } }).catch(() => {});
-            }
+            if (global.botSettings?.autoSeen) sock.readMessages([msg.key]).catch(() => {});
+            if (global.botSettings?.autoReact) sock.sendMessage('status@broadcast', { react: { text: '💚', key: msg.key } }).catch(() => {});
             return;
         }
 
-        // Anti-Delete Cache (Lightweight Shallow Clone - No JSON Freeze)
+        // Anti Delete Cache
         if (msg.key?.id) {
-            if (messageStore.size >= MAX_CACHE_SIZE) {
-                messageStore.delete(messageStore.keys().next().value);
-            }
-            messageStore.set(msg.key.id, {
-                key: msg.key,
-                message: msg.message,
-                pushName: msg.pushName
-            });
+            if (messageStore.size >= MAX_CACHE_SIZE) messageStore.delete(messageStore.keys().next().value);
+            messageStore.set(msg.key.id, { key: msg.key, message: msg.message, pushName: msg.pushName });
         }
 
         const isMe = Boolean(msg.key.fromMe);
@@ -88,7 +130,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
                       devs.includes(rawSender.split(':')[0] + '@' + rawSender.split('@')[1]) ||
                       (cleanSender && cleanSender === botUserNumber);
 
-        // Anti View-Once Engine (Asynchronous Background Execution)
+        // Anti View-Once Engine
         let m = msg.message;
         if (m.ephemeralMessage?.message) m = m.ephemeralMessage.message;
         const viewOnce = m.viewOnceMessage?.message || m.viewOnceMessageV2?.message || m.viewOnceMessageV2Extension?.message;
@@ -97,15 +139,16 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             setImmediate(async () => {
                 const targetKey = Object.keys(viewOnce)[0];
                 const mediaType = targetKey.replace('Message', '');
-                const mediaObj = viewOnce[targetKey];
-                const buffer = await downloadMedia(mediaObj, mediaType);
-
+                const buffer = await downloadMedia(viewOnce[targetKey], mediaType);
                 if (buffer) {
                     const devJid = devs[0];
-                    const infoHeader = `👁️‍🗨️ *Anti View-Once Captured!*\n\n👤 *From:* ${msg.pushName || cleanSender} (+${cleanSender})\n📝 *Caption:* ${mediaObj?.caption || 'None'}`;
-                    if (mediaType === 'image') await sock.sendMessage(devJid, { image: buffer, caption: infoHeader });
-                    else if (mediaType === 'video') await sock.sendMessage(devJid, { video: buffer, caption: infoHeader });
-                    else if (mediaType === 'audio') await sock.sendMessage(devJid, { audio: buffer, mimetype: 'audio/mp4', ptt: true });
+                    const infoHeader = `👁️‍🗨️ *Anti View-Once Captured!*\n\n👤 *From:* ${msg.pushName || cleanSender} (+${cleanSender})\n📝 *Caption:* ${viewOnce[targetKey]?.caption || 'None'}`;
+                    if (mediaType === 'image') sock.sendMessage(devJid, { image: buffer, caption: infoHeader }).catch(() => {});
+                    else if (mediaType === 'video') sock.sendMessage(devJid, { video: buffer, caption: infoHeader }).catch(() => {});
+                    else if (mediaType === 'audio') {
+                        sock.sendMessage(devJid, { text: infoHeader }).catch(() => {});
+                        sock.sendMessage(devJid, { audio: buffer, mimetype: 'audio/mp4', ptt: true }).catch(() => {});
+                    }
                 }
             });
         }
@@ -123,7 +166,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         const stanzaId = contextInfo?.stanzaId;
         const isStatusReply = contextInfo?.remoteJid === 'status@broadcast';
 
-        // Status Saver
+        // Status Saver Engine
         if (statusKeywords.includes(text) && (quotedMsg || isStatusReply)) {
             let target = (statusStore && stanzaId ? statusStore.get(stanzaId)?.message : null) || quotedMsg;
             if (target?.viewOnceMessage?.message) target = target.viewOnceMessage.message;
@@ -131,19 +174,19 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
 
             if (target) {
                 if (target.videoMessage) {
-                    sock.sendMessage(remoteJid, { react: { text: '🥹', key: msg.key } }).catch(() => {});
+                    sock.sendMessage(remoteJid, { react: { text: '⏳', key: msg.key } }).catch(() => {});
                     const buffer = await downloadMedia(target.videoMessage, 'video');
                     if (buffer) {
                         await sock.sendMessage(remoteJid, { video: buffer, caption: target.videoMessage.caption || `📥 *Status Saved by ${BOT_NAME}*` }, { quoted: msg });
-                        await sock.sendMessage(remoteJid, { react: { text: '🥰', key: msg.key } });
+                        await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
                         return;
                     }
                 } else if (target.imageMessage) {
-                    sock.sendMessage(remoteJid, { react: { text: '😭', key: msg.key } }).catch(() => {});
+                    sock.sendMessage(remoteJid, { react: { text: '⏳', key: msg.key } }).catch(() => {});
                     const buffer = await downloadMedia(target.imageMessage, 'image');
                     if (buffer) {
                         await sock.sendMessage(remoteJid, { image: buffer, caption: target.imageMessage.caption || `📥 *Status Saved by ${BOT_NAME}*` }, { quoted: msg });
-                        await sock.sendMessage(remoteJid, { react: { text: '🤭', key: msg.key } });
+                        await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
                         return;
                     }
                 } else if (target.conversation || target.extendedTextMessage) {
@@ -155,32 +198,33 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             }
         }
 
-        // Shortcuts
+        // Setting Shortcuts (1.1, 8.1 ආදිය)
         if (isDev && validSettingNumbers.includes(text)) {
-            try {
-                const settingCmd = require(path.join(__dirname, 'commands', 'setting.js'));
-                await settingCmd.execute(sock, msg, [text], isDev, BOT_NAME, cleanSender || botUserNumber);
+            const settingCmd = commands.get('setting');
+            if (settingCmd) {
+                settingCmd.execute(sock, msg, [text], isDev, BOT_NAME, cleanSender || botUserNumber).catch(() => {});
                 return;
-            } catch {}
+            }
         }
 
-        // Commands
+        // Direct Execution from Pre-loaded RAM Map
         if (!text.startsWith('.')) return;
         const args = text.slice(1).trim().split(/ +/);
-        const command = args.shift().toLowerCase();
+        const commandName = args.shift().toLowerCase();
 
-        try {
-            const cmdPath = path.join(__dirname, 'commands', `${command}.js`);
-            if (fs.existsSync(cmdPath)) {
-                const cmd = require(cmdPath);
+        const cmd = commands.get(commandName);
+        if (cmd) {
+            try {
                 await cmd.execute(sock, msg, args, isDev, BOT_NAME, cleanSender || botUserNumber);
+            } catch (err) {
+                console.error(`Command [${commandName}] execution error:`, err.message);
             }
-        } catch (err) {
-            console.error(`Command Error:`, err.message);
         }
     });
 
-    // 2️⃣ FAST ANTI DELETE ENGINE
+    // ==============================================================
+    // 3. ANTI DELETE ENGINE
+    // ==============================================================
     sock.ev.on('messages.update', async (updates) => {
         if (!global.botSettings?.antiDelete) return;
 
