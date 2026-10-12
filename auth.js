@@ -10,7 +10,7 @@ const sessionSchema = new mongoose.Schema(
             index: true
         },
         data: {
-            type: String, // String එකක් ලෙස BufferJSON stringify කර ගබඩා කරයි
+            type: String,
             required: true
         }
     },
@@ -24,8 +24,6 @@ const Session = mongoose.models.Session || mongoose.model("Session", sessionSche
 async function saveSession(sessionId, credsData) {
     try {
         if (!sessionId || !credsData) return false;
-
-        // Buffer Objects ආරක්ෂිතව stringify කිරීම
         const serialized = JSON.stringify(credsData, BufferJSON.replacer);
 
         await Session.findOneAndUpdate(
@@ -43,11 +41,9 @@ async function saveSession(sessionId, credsData) {
 async function getSession(sessionId) {
     try {
         if (!sessionId) return null;
-
         const session = await Session.findOne({ id: String(sessionId) }).lean();
         if (!session || !session.data) return null;
 
-        // Buffers යළි Node Buffers ලෙසම decode කිරීම
         return JSON.parse(session.data, BufferJSON.reviver);
     } catch (error) {
         console.error("[SESSION READ ERROR]:", error.message);
