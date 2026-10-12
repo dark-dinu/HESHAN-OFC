@@ -131,19 +131,19 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
 
             if (target) {
                 if (target.videoMessage) {
-                    sock.sendMessage(remoteJid, { react: { text: 'ᴏɴɴ', key: msg.key } }).catch(() => {});
+                    sock.sendMessage(remoteJid, { react: { text: '🥹', key: msg.key } }).catch(() => {});
                     const buffer = await downloadMedia(target.videoMessage, 'video');
                     if (buffer) {
                         await sock.sendMessage(remoteJid, { video: buffer, caption: target.videoMessage.caption || `📥 *Status Saved by ${BOT_NAME}*` }, { quoted: msg });
-                        await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
+                        await sock.sendMessage(remoteJid, { react: { text: '🥰', key: msg.key } });
                         return;
                     }
                 } else if (target.imageMessage) {
-                    sock.sendMessage(remoteJid, { react: { text: '⏳', key: msg.key } }).catch(() => {});
+                    sock.sendMessage(remoteJid, { react: { text: '😭', key: msg.key } }).catch(() => {});
                     const buffer = await downloadMedia(target.imageMessage, 'image');
                     if (buffer) {
                         await sock.sendMessage(remoteJid, { image: buffer, caption: target.imageMessage.caption || `📥 *Status Saved by ${BOT_NAME}*` }, { quoted: msg });
-                        await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
+                        await sock.sendMessage(remoteJid, { react: { text: '🤭', key: msg.key } });
                         return;
                     }
                 } else if (target.conversation || target.extendedTextMessage) {
