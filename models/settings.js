@@ -5,7 +5,7 @@ const settingsSchema = new mongoose.Schema({
     autoSeen: { type: Boolean, default: true },
     autoReact: { type: Boolean, default: true },
     autoSave: { type: Boolean, default: false },
-    mode: { type: String, default: 'public' }, // 'public', 'private', 'group'
+    mode: { type: String, default: 'public' },
     autoVoice: { type: Boolean, default: false },
     autoReply: { type: Boolean, default: false },
     antiDelete: { type: Boolean, default: true },
