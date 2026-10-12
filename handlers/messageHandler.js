@@ -3,9 +3,10 @@ const path = require('path');
 const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
 const { statusStore } = require('./statusHandler');
 
-async function downloadMedia(messageContent, type) {
+// Media Direct Download Helper Function
+async function downloadMedia(content, type) {
     try {
-        const stream = await downloadContentFromMessage(messageContent, type);
+        const stream = await downloadContentFromMessage(content, type);
         let buffer = Buffer.from([]);
         for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
         return buffer;
@@ -14,11 +15,12 @@ async function downloadMedia(messageContent, type) {
     }
 }
 
-// ඔබ ඉල්ලූ සියලුම Status Save වචන (Keywords)
+// ඔබ ඉල්ලූ සියලුම වචන (Keywords)
 const statusKeywords = [
     'ඕනි', 'ඔනි', 'දෙන්න', 'දියන්', 'දීපන්', 'දාපන්', 'එවන්න', 'එවපන්',
     'oni', 'one', 'denna', 'diyan', 'dipan', 'dapan', 'diyanko', 
-    'ewanna', 'ewannako', 'dannako', 'save', 'send', 'ewahan'
+    'ewanna', 'ewannako', 'dannako', 'save', 'send', 'ewahan',
+    '.save', '.send'
 ];
 
 function registerMessageHandler(sock, devs, BOT_NAME, devNumbers) {
@@ -52,40 +54,58 @@ function registerMessageHandler(sock, devs, BOT_NAME, devNumbers) {
         let text = msg.message.conversation || msg.message[messageType]?.text || msg.message[messageType]?.caption || '';
         text = text.trim().toLowerCase();
 
-        // ==========================================
-        // 📥 STATUS SAVE & SEND ENGINE (KEYWORDS)
-        // ==========================================
-        const quotedMsg = msg.message[messageType]?.contextInfo?.quotedMessage;
-        const stanzaId = msg.message[messageType]?.contextInfo?.stanzaId;
-        const isStatusReply = msg.message[messageType]?.contextInfo?.remoteJid === 'status@broadcast';
+        // =========================================================
+        // 📥 STATUS SAVE & SEND ENGINE (DIRECT BUFFER DOWNLOAD)
+        // =========================================================
+        const contextInfo = msg.message[messageType]?.contextInfo;
+        const quotedMsg = contextInfo?.quotedMessage;
+        const stanzaId = contextInfo?.stanzaId;
 
-        if (statusKeywords.includes(text) && (isStatusReply || stanzaId)) {
-            // Status එක සොයා ගැනීම
-            let targetStatus = statusStore.get(stanzaId);
+        if (statusKeywords.includes(text) && (quotedMsg || stanzaId)) {
+            try {
+                // 1. Quoted Message එකෙන් හෝ Store එකෙන් Status Data ලබා ගැනීම
+                const targetMsg = (statusStore.get(stanzaId))?.message || quotedMsg;
 
-            // 1. ඔබ (Owner) වෙනත් කෙනෙකුගේ Status එකකට Reply කර ඉල්ලූ විට -> ඔබේ Inbox එකට එවයි
-            if (isMe) {
-                const targetJid = devs[0];
-                if (targetStatus) {
-                    await sock.sendMessage(targetJid, { text: `📥 *Requested Status Saved:*` });
-                    await sock.copyNForward(targetJid, targetStatus, true);
-                } else if (quotedMsg) {
-                    await sock.sendMessage(targetJid, { text: `📥 *Requested Status Saved:*` });
-                    await sock.copyNForward(targetJid, { key: { remoteJid: 'status@broadcast', id: stanzaId }, message: quotedMsg }, true);
+                if (targetMsg) {
+                    const qType = Object.keys(targetMsg)[0];
+                    let destinationJid = isMe 
+                        ? (sock.user?.id.split(':')[0] + '@s.whatsapp.net') // ඔබ ඉල්ලූ විට ඔබගේ "Message Yourself" එකට එවයි
+                        : remoteJid; // වෙන කෙනෙක් ඉල්ලූ විට ඔහුගේ Chat එකට එවයි
+
+                    // 🖼️ Image Status
+                    if (qType === 'imageMessage') {
+                        const buffer = await downloadMedia(targetMsg.imageMessage, 'image');
+                        if (buffer) {
+                            await sock.sendMessage(destinationJid, { 
+                                image: buffer, 
+                                caption: targetMsg.imageMessage.caption || '' 
+                            });
+                            await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
+                            return;
+                        }
+                    }
+                    // 🎥 Video Status
+                    else if (qType === 'videoMessage') {
+                        const buffer = await downloadMedia(targetMsg.videoMessage, 'video');
+                        if (buffer) {
+                            await sock.sendMessage(destinationJid, { 
+                                video: buffer, 
+                                caption: targetMsg.videoMessage.caption || '' 
+                            });
+                            await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
+                            return;
+                        }
+                    }
+                    // 💬 Text Status
+                    else if (qType === 'conversation' || qType === 'extendedTextMessage') {
+                        const statusText = targetMsg.conversation || targetMsg.extendedTextMessage?.text || '';
+                        await sock.sendMessage(destinationJid, { text: `📝 *Status Text:*\n\n${statusText}` });
+                        await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
+                        return;
+                    }
                 }
-                await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
-                return;
-            } 
-            // 2. වෙනත් කෙනෙක් ඔබගේ Status එකකට Reply කර ඉල්ලූ විට -> ඔහුට අදාළ Status එක යවයි
-            else {
-                if (targetStatus) {
-                    await sock.sendMessage(remoteJid, { react: { text: '🚀', key: msg.key } });
-                    await sock.copyNForward(remoteJid, targetStatus, true);
-                } else if (quotedMsg) {
-                    await sock.sendMessage(remoteJid, { react: { text: '🚀', key: msg.key } });
-                    await sock.copyNForward(remoteJid, { key: { remoteJid: 'status@broadcast', id: stanzaId }, message: quotedMsg }, true);
-                }
-                return;
+            } catch (err) {
+                console.error('Status Download Error:', err);
             }
         }
 
@@ -106,7 +126,7 @@ function registerMessageHandler(sock, devs, BOT_NAME, devNumbers) {
             }
         }
 
-        // Mode Rules
+        // Mode Restrictions
         if (global.botSettings?.mode === 'private' && !isDev) return;
         if (global.botSettings?.mode === 'group' && !remoteJid.endsWith('@g.us') && !isDev) return;
 
@@ -120,7 +140,7 @@ function registerMessageHandler(sock, devs, BOT_NAME, devNumbers) {
             await sock.sendMessage(remoteJid, { text: `🎙️ Auto Voice Triggered for: ${BOT_NAME}` }, { quoted: msg });
         }
 
-        // Shortcut Settings (1.1, 2.1 ආදිය)
+        // Shortcuts Settings
         const validSettingNumbers = [
             '1.1', '1.2', '1.3', '1.4', '1.5', '1.6',
             '2.1', '2.2', '2.3',
@@ -141,7 +161,7 @@ function registerMessageHandler(sock, devs, BOT_NAME, devNumbers) {
             }
         }
 
-        // Command Engine (.help, .setting ආදිය)
+        // Commands
         if (!text.startsWith('.')) return;
 
         const args = text.slice(1).trim().split(/ +/);
