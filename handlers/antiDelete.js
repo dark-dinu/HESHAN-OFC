@@ -16,18 +16,15 @@ async function downloadMedia(messageContent, type) {
 }
 
 function registerAntiDelete(sock, devs) {
-    // ලැබෙන හැම Message එකක්ම cache කර තබා ගැනීම
     sock.ev.on('messages.upsert', async ({ messages }) => {
         for (const msg of messages) {
             if (msg.key && msg.key.id) {
                 messageStore.set(msg.key.id, msg);
-                // පැය 2කින් Memory එකෙන් ඉවත් කරයි
                 setTimeout(() => messageStore.delete(msg.key.id), 1000 * 60 * 120);
             }
         }
     });
 
-    // Delete for Everyone Detect වූ විට
     sock.ev.on('messages.update', async (updates) => {
         if (!global.botSettings?.antiDelete) return;
 
@@ -40,7 +37,7 @@ function registerAntiDelete(sock, devs) {
 
                 const senderJid = cachedMsg.key.participant || cachedMsg.key.remoteJid;
                 const senderNum = senderJid.split('@')[0].split(':')[0];
-                const devJid = devs[0] + '@s.whatsapp.net';
+                const devJid = devs[0];
                 const chatLocation = cachedMsg.key.remoteJid.endsWith('@g.us') ? 'Group Chat' : 'Inbox Chat';
 
                 const alertText = `🚮 *Deleted Message Recovered!*\n\n👤 *From:* +${senderNum}\n📍 *Chat:* ${chatLocation}\n🕒 *Time:* ${new Date().toLocaleTimeString()}`;
@@ -48,13 +45,10 @@ function registerAntiDelete(sock, devs) {
                 const m = cachedMsg.message;
                 const type = Object.keys(m)[0];
 
-                // 1. Text
                 if (type === 'conversation' || type === 'extendedTextMessage') {
                     const text = m.conversation || m.extendedTextMessage?.text;
                     await sock.sendMessage(devJid, { text: `${alertText}\n\n💬 *Message:*\n${text}` });
-                } 
-                // 2. Voice Note
-                else if (type === 'audioMessage') {
+                } else if (type === 'audioMessage') {
                     const audioBuffer = await downloadMedia(m.audioMessage, 'audio');
                     if (audioBuffer) {
                         await sock.sendMessage(devJid, { text: alertText });
@@ -64,9 +58,7 @@ function registerAntiDelete(sock, devs) {
                             ptt: m.audioMessage.ptt || false 
                         });
                     }
-                } 
-                // 3. Video
-                else if (type === 'videoMessage') {
+                } else if (type === 'videoMessage') {
                     const videoBuffer = await downloadMedia(m.videoMessage, 'video');
                     if (videoBuffer) {
                         await sock.sendMessage(devJid, { 
@@ -74,9 +66,7 @@ function registerAntiDelete(sock, devs) {
                             caption: `${alertText}\n\n📝 *Caption:* ${m.videoMessage.caption || 'None'}` 
                         });
                     }
-                } 
-                // 4. Image
-                else if (type === 'imageMessage') {
+                } else if (type === 'imageMessage') {
                     const imgBuffer = await downloadMedia(m.imageMessage, 'image');
                     if (imgBuffer) {
                         await sock.sendMessage(devJid, { 
@@ -84,9 +74,7 @@ function registerAntiDelete(sock, devs) {
                             caption: `${alertText}\n\n📝 *Caption:* ${m.imageMessage.caption || 'None'}` 
                         });
                     }
-                } 
-                // 5. අනෙක් Media (Stickers/Docs)
-                else {
+                } else {
                     await sock.sendMessage(devJid, { text: alertText });
                     await sock.copyNForward(devJid, cachedMsg, true);
                 }
