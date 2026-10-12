@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const { updateSetting } = require('../models/settings');
 
 module.exports = {
@@ -5,10 +7,10 @@ module.exports = {
     execute: async (sock, msg, args, isDev, BOT_NAME, cleanSender) => {
         const chatJid = msg.key.remoteJid;
 
-        // Developer නොවේ නම් Sender Number එක සහිතව Error එක එවයි
+        // Developer නොවේ නම්
         if (!isDev) {
             return sock.sendMessage(chatJid, { 
-                text: `❌ *Only Developers can change settings!*\n\n📱 *Your Detected ID:* \`${cleanSender}\`\n\n💡 _මේ අංකය index.js එකේ devs array එකට ඇතුළත් කරන්න._` 
+                text: `❌ *Only Developers can change settings!*\n\n📱 *Your ID:* \`${cleanSender}\`` 
             }, { quoted: msg });
         }
 
@@ -16,7 +18,19 @@ module.exports = {
         const current = global.botSettings;
         const status = (val) => val ? '✔️' : '❌';
 
+        // 🖼️ logo.jpg එක තිබේදැයි සොයා ගැනීම (Root එකේ හෝ assets ෆෝල්ඩරයේ)
+        let logoPath = path.join(__dirname, '../logo.jpg');
+        if (!fs.existsSync(logoPath)) {
+            logoPath = path.join(__dirname, '../assets/logo.jpg');
+        }
+
+        // ==========================================
+        // 1️⃣ .setting මෙනු එක පෙන්වීම (.setting ගැසූ විට)
+        // ==========================================
         if (!action) {
+            // 🛠️ React එක දැමීම
+            await sock.sendMessage(chatJid, { react: { text: '🛠️', key: msg.key } });
+
             const menu = `⚙️⃝┅┅┅┅┅┅┅┅┅◇
 ┃ *ꜱᴇᴛᴛɪɴɢ*
 
@@ -64,11 +78,22 @@ module.exports = {
 
 > *❬ ${BOT_NAME} 𝐒𝐄𝐓𝐓𝐈𝐍𝐆  🛠️ ❭*
 
-*💡 Quick Set:* Type *.setting <number>* (e.g. *.setting 1.1*)`;
+*💡 Quick Set:* Reply with number (e.g. *1.1*)`;
 
-            return sock.sendMessage(chatJid, { text: menu }, { quoted: msg });
+            // Logo එක තිබේ නම් Image එක සමඟ Caption ලෙස යැවීම
+            if (fs.existsSync(logoPath)) {
+                return sock.sendMessage(chatJid, { 
+                    image: fs.readFileSync(logoPath), 
+                    caption: menu 
+                }, { quoted: msg });
+            } else {
+                return sock.sendMessage(chatJid, { text: menu }, { quoted: msg });
+            }
         }
 
+        // ==========================================
+        // 2️⃣ Setting එකක් වෙනස් කිරීම (1.1, 2.1 ගැසූ විට)
+        // ==========================================
         const map = {
             '1.1': ['autoSeen', true, 'Auto Status Seen ON ✔️'],
             '1.2': ['autoSeen', false, 'Auto Status Seen OFF ❌'],
@@ -102,6 +127,10 @@ module.exports = {
             return sock.sendMessage(chatJid, { text: '⚠️ Invalid option! Type *.setting* to view menu.' }, { quoted: msg });
         }
 
+        // ⚙️ React එක දැමීම (Setting change වෙද්දී)
+        await sock.sendMessage(chatJid, { react: { text: '⚙️', key: msg.key } });
+
+        // Database & Cache Update කිරීම
         await updateSetting(target[0], target[1]);
 
         if (target[0] === 'alwaysOnline') {
