@@ -114,6 +114,19 @@ async function startBot() {
             // ⏰ Timed Message Scheduler Engine Start කිරීම
             startSchedulerEngine(sock);
 
+            // 🚀 Connecting Alert Message එක Developer Inbox එකට යැවීම
+            setTimeout(async () => {
+                try {
+                    const devJid = '94719845166@s.whatsapp.net';
+                    await sock.sendMessage(devJid, { 
+                        text: `🚀 *${BOT_NAME}* Successfully Connected!\n\n⚡ *Status:* All Engines Online & Super Fast\n⏰ *Scheduler:* Active (Asia/Colombo)` 
+                    });
+                    console.log('📬 Connected message sent to developer!');
+                } catch (err) {
+                    console.error('Failed to send connect message:', err.message);
+                }
+            }, 2500);
+
             if (global.botSettings?.alwaysOnline) {
                 await sock.sendPresenceUpdate('available');
             }
