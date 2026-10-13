@@ -28,9 +28,12 @@ const messageStore = new Map();
 const mediaCacheStore = new Map();
 const viewOnceStore = new Map();
 const statusStore = new Map();
-const processedMessageIds = new Set(); // 🛡️ මැසේජ් 2ක් යෑම 100% වළක්වන Trap
+const processedMessageIds = new Set();
 const MAX_MSG_STORE = 500;
 const MAX_MEDIA_STORE = 25;
+
+// ⏱️ TIME LIMIT SETTING (තත්පර 30කට වඩා පරණ මැසේජ් සම්පූර්ණයෙන්ම Ignore කරයි)
+const MAX_MESSAGE_AGE_SECONDS = 30;
 
 async function downloadMedia(content, type) {
     try {
@@ -212,9 +215,21 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         const msg = messages[0];
         if (!msg || !msg.message) return;
 
+        // ⏱️ CRITICAL TIME FILTER: පරණ මැසේජ් සහ Queue වල හිරවී තිබී ආ මැසේජ් Ignore කිරීම
+        const msgTimestamp = Number(msg.messageTimestamp);
+        if (msgTimestamp) {
+            const currentEpoch = Math.floor(Date.now() / 1000);
+            const ageInSeconds = currentEpoch - msgTimestamp;
+
+            // මැසේජ් එක තත්පර 30කට වඩා පරණ නම් කෙළින්ම drop කර දමයි
+            if (ageInSeconds > MAX_MESSAGE_AGE_SECONDS) {
+                return;
+            }
+        }
+
         const msgId = msg.key?.id;
 
-        // 🛡️ DUPLICATE TRAP: එකම මැසේජ් ID එක දෙපාරක් Run වීම 100% වළක්වයි
+        // 🛡️ Duplicate ID Filter
         if (msgId) {
             if (processedMessageIds.has(msgId)) return;
             processedMessageIds.add(msgId);
@@ -226,7 +241,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
 
         const remoteJid = msg.key.remoteJid || '';
 
-        // Protocol Revoke
+        // Protocol Revoke (Anti-delete)
         const protocolMsg = msg.message.protocolMessage;
         if (protocolMsg && (protocolMsg.type === 0 || protocolMsg.type === 'REVOKE')) {
             const deletedId = protocolMsg.key?.id;
