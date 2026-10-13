@@ -14,7 +14,7 @@ function getRemainingCooldown() {
     return 0;
 }
 
-// URL එකකින් Image Buffer එකක් Stream කිරීම
+// URL Stream Helper
 function fetchBufferFromUrl(url) {
     return new Promise((resolve, reject) => {
         const client = url.startsWith('https') ? https : http;
@@ -27,7 +27,6 @@ function fetchBufferFromUrl(url) {
     });
 }
 
-// Message එකකින් Image Message එක හඳුනාගැනීම
 function extractImageMessage(msg) {
     let m = msg.message;
     if (m?.ephemeralMessage?.message) m = m.ephemeralMessage.message;
@@ -47,52 +46,63 @@ function extractImageMessage(msg) {
     return null;
 }
 
-// 🖼️ 100% Ultra-Fast No-Crop Full DP Generator (Jimp Aesthetic Blur)
+// 🖼️ Jimp v1.x & v0.x Universal Full DP Generator
 async function generateFullDpBuffer(rawBuffer) {
-    const Jimp = require('jimp');
-    const image = await Jimp.read(rawBuffer);
-    
-    let w = image.bitmap.width || image.getWidth();
-    let h = image.bitmap.height || image.getHeight();
-    const maxDimension = Math.max(w, h);
+    const jimpPkg = require('jimp');
+    const JimpClass = jimpPkg.Jimp || jimpPkg;
 
-    // RAM එක පිරීම වැළැක්වීමට අධික Resolution (4K+) නම් Safe Scale කිරීම
-    if (maxDimension > 1200) {
-        image.scale(1200 / maxDimension);
-        w = image.bitmap.width || image.getWidth();
-        h = image.bitmap.height || image.getHeight();
-    }
+    const image = await JimpClass.read(rawBuffer);
 
+    const w = image.bitmap ? image.bitmap.width : image.getWidth();
+    const h = image.bitmap ? image.bitmap.height : image.getHeight();
     const max = Math.max(w, h);
 
-    // 1:1 Canvas එකක් සාදා දෙපැත්තට Soft Blur Background එකක් දමා මුළු Photo එක මැදට ගැනීම
-    const background = image.clone();
-    background.resize(max, max);
-    background.blur(10);
+    // Background Canvas සෑදීම
+    let background;
+    if (typeof JimpClass.create === 'function') {
+        background = await JimpClass.create({ width: max, height: max, color: 0x000000FF });
+    } else {
+        background = new JimpClass(max, max, 0x000000FF);
+    }
 
     const x = Math.floor((max - w) / 2);
     const y = Math.floor((max - h) / 2);
-    background.composite(image, x, y);
 
-    // WhatsApp Native 720x720 HD Profile Picture Resolution
-    background.resize(720, 720);
+    if (typeof background.composite === 'function') {
+        background.composite(image, x, y);
+    }
 
-    return await background.getBufferAsync(Jimp.MIME_JPEG);
+    // 720x720 Resize
+    if (typeof background.resize === 'function') {
+        try {
+            background.resize({ w: 720, h: 720 });
+        } catch {
+            background.resize(720, 720);
+        }
+    }
+
+    // Buffer Output (v1.x සහ v0.x දෙකටම ගැළපෙන සේ)
+    if (typeof background.getBuffer === 'function') {
+        const res = background.getBuffer('image/jpeg');
+        return res instanceof Promise ? await res : res;
+    }
+    if (typeof background.getBufferAsync === 'function') {
+        return await background.getBufferAsync('image/jpeg');
+    }
+    return rawBuffer;
 }
 
-// ⚡ WhatsApp Profile Picture Updater (Double-Fallback Engine)
+// ⚡ WhatsApp Profile Picture Updater
 async function applyProfilePicture(sock, targetJid, imageBuffer) {
     const isGroup = targetJid.endsWith('@g.us');
 
-    // 1st Method: Native Baileys Method
     try {
         await sock.updateProfilePicture(targetJid, imageBuffer);
         return true;
-    } catch (err1) {
-        console.log('[DP UPDATE] Method 1 fallback to Direct IQ:', err1.message);
+    } catch (err) {
+        console.log('[DP UPDATE] Method 1 failed, trying Direct IQ:', err.message);
     }
 
-    // 2nd Method: Direct WhatsApp IQ Stanza (Pure Protocol)
     const attrs = isGroup
         ? { to: targetJid, type: 'set', xmlns: 'w:profile:picture' }
         : { to: '@s.whatsapp.net', target: targetJid, type: 'set', xmlns: 'w:profile:picture' };
@@ -122,14 +132,11 @@ module.exports = {
                         msg.message?.imageMessage?.caption || '';
         const command = (cmdName || rawText.trim().slice(1).split(/\s+/)[0] || 'dp').toLowerCase();
 
-        // Device ID (:1/:2) ඉවත් කළ පිරිසිදු Bot JID එක
         const rawBotId = sock.user?.id || '';
         const cleanBotNumber = rawBotId.split(':')[0].split('@')[0].replace(/[^0-9]/g, '');
         const botJid = `${cleanBotNumber}@s.whatsapp.net`;
 
-        // =====================================================================
-        // 🖼️ 1. NO-CROP FULL DP (.setfulldp / .fulldp) - OWNER ONLY
-        // =====================================================================
+        // 1. NO-CROP FULL DP
         if (command === 'setfulldp' || command === 'fulldp') {
             if (!isDev) {
                 return sock.sendMessage(chatJid, { text: '❌ *Access Denied!* Only Bot Owner can change DP.' }, { quoted: msg });
@@ -144,7 +151,7 @@ module.exports = {
 
             const imgMsg = extractImageMessage(msg);
             if (!imgMsg) {
-                return sock.sendMessage(chatJid, { text: '⚠️ Please reply to an image or send an image with caption *.setfulldp*' }, { quoted: msg });
+                return sock.sendMessage(chatJid, { text: '⚠️ Please reply to an image with *.setfulldp*' }, { quoted: msg });
             }
 
             sock.sendMessage(chatJid, { react: { text: '⏳', key: msg.key } }).catch(() => {});
@@ -154,10 +161,7 @@ module.exports = {
                 let rawBuffer = Buffer.from([]);
                 for await (const chunk of stream) rawBuffer = Buffer.concat([rawBuffer, chunk]);
 
-                // Jimp මඟින් සම්පූර්ණ Photo එකම 720x720 HD Canvas එකක් බවට පත් කිරීම
                 const fullBuffer = await generateFullDpBuffer(rawBuffer);
-
-                // Profile Picture Apply කිරීම
                 await applyProfilePicture(sock, botJid, fullBuffer);
 
                 lastDpChangeTime = Date.now();
@@ -175,9 +179,7 @@ module.exports = {
             }
         }
 
-        // =====================================================================
-        // 👥 2. GROUP DP CHANGER (.setgdp / .gdp)
-        // =====================================================================
+        // 2. GROUP DP CHANGER
         if (command === 'setgdp' || command === 'gdp') {
             if (!chatJid.endsWith('@g.us')) {
                 return sock.sendMessage(chatJid, { text: '❌ This command can only be used in Groups!' }, { quoted: msg });
@@ -220,9 +222,7 @@ module.exports = {
             }
         }
 
-        // =====================================================================
-        // 🎭 3. DP CLONER (.clonedp / .clone)
-        // =====================================================================
+        // 3. DP CLONER
         if (command === 'clonedp' || command === 'clone') {
             if (!isDev) {
                 return sock.sendMessage(chatJid, { text: '❌ *Access Denied!* Only Bot Owner can clone DP.' }, { quoted: msg });
@@ -279,9 +279,7 @@ module.exports = {
             }
         }
 
-        // =====================================================================
-        // 🖼️ 4. STANDARD SET DP (.setdp)
-        // =====================================================================
+        // 4. STANDARD SET DP
         if (command === 'setdp') {
             if (!isDev) {
                 return sock.sendMessage(chatJid, { text: '❌ *Access Denied!* Only Bot Owner can set DP.' }, { quoted: msg });
@@ -319,9 +317,7 @@ module.exports = {
             }
         }
 
-        // =====================================================================
-        // 👤 5. GET DP (.getdp / .dp)
-        // =====================================================================
+        // 5. GET DP
         if (command === 'getdp' || command === 'dp') {
             let targetJid = null;
             const contextInfo = msg.message?.extendedTextMessage?.contextInfo || 
