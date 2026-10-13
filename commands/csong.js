@@ -25,6 +25,26 @@ function fetchJson(url) {
     });
 }
 
+// ⚡ CDN Buffer Downloader (CDN Block වීම් සහ Stream Failure 100% වළක්වයි)
+function fetchBuffer(url) {
+    return new Promise((resolve, reject) => {
+        const client = url.startsWith('https') ? https : http;
+        client.get(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+        }, (res) => {
+            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                return fetchBuffer(res.headers.location).then(resolve).catch(reject);
+            }
+            const chunks = [];
+            res.on('data', chunk => chunks.push(chunk));
+            res.on('end', () => resolve(Buffer.concat(chunks)));
+            res.on('error', err => reject(err));
+        }).on('error', err => reject(err));
+    });
+}
+
 // Fast YouTube Search
 function searchYouTube(query) {
     return new Promise((resolve) => {
@@ -77,9 +97,9 @@ function cleanTitle(raw) {
         .trim();
 }
 
-// Channel Invite Code එක Link එකෙන් වෙන් කර ගැනීම (/392 වැනි අමතර කොටස් ඉවත් කර)
+// Channel URL එකෙන් නියම Invite Code එක පමණක් වෙන් කර ගැනීම (අග ඇති /392 වැනි post IDs ඉවත් කරයි)
 function extractChannelInviteCode(url) {
-    const match = url.match(/whatsapp\.com\/channel\/([a-zA-Z0-9_-]{15,24})/i);
+    const match = url.match(/whatsapp\.com\/channel\/([a-zA-Z0-9]{20,24})/i);
     return match ? match[1] : null;
 }
 
@@ -101,34 +121,23 @@ module.exports = {
         let targetJid = null;
         let songQuery = rawInput;
 
-        // Channel Link එක හඳුනාගැනීම
+        // 1. Channel JID එක සොයා ගැනීම
         const inviteCode = extractChannelInviteCode(rawInput);
 
         if (inviteCode) {
             try {
                 const metadata = await sock.newsletterMetadata('invite', inviteCode);
                 if (!metadata || !metadata.id) throw new Error('Channel ID not found');
-
-                targetJid = metadata.id;
-
-                // 🛡️ Admin Role පරීක්ෂාව
-                const role = metadata.viewer_metadata?.role;
-                if (role !== 'ADMIN' && role !== 'OWNER') {
-                    sock.sendMessage(currentChat, { react: { text: '❌', key: msg.key } }).catch(() => {});
-                    return sock.sendMessage(currentChat, {
-                        text: `❌ *Permission Denied!*\n\nBot ගේ WhatsApp අංකය මෙම Channel එකේ *Admin* කෙනෙක් නොවේ!\n\n👉 කරුණාකර Channel Settings > Admins වෙත ගොස් Bot ගේ අංකය Admin කෙනෙක් ලෙස Add කරන්න.`
-                    }, { quoted: msg });
-                }
-
+                targetJid = metadata.id; // e.g. 120363421906774107@newsletter
             } catch (err) {
                 console.error('[CSONG RESOLVE ERROR]:', err.message);
                 sock.sendMessage(currentChat, { react: { text: '❌', key: msg.key } }).catch(() => {});
                 return sock.sendMessage(currentChat, { 
-                    text: `❌ *Channel එක සොයාගත නොහැකි විය!* Link එක පරීක්ෂා කරන්න.\n\n*Error:* ${err.message}` 
+                    text: `❌ *Channel එක සොයාගත නොහැකි විය!*\n\n*Error:* ${err.message}` 
                 }, { quoted: msg });
             }
 
-            // Link එක සහ trailing අංක ඉවත් කර සින්දුවේ නම වෙන් කිරීම
+            // Link එක ඉවත් කර සින්දුවේ නම වෙන් කිරීම
             songQuery = rawInput
                 .replace(/https?:\/\/(?:www\.)?whatsapp\.com\/channel\/[a-zA-Z0-9_\-\/]+/i, '')
                 .replace(/^[\s,]+|[\s,]+$/g, '')
@@ -164,7 +173,7 @@ module.exports = {
 
             const info = res?.data || res;
             const downloadUrl = info?.download_link || info?.direct_url;
-            if (!downloadUrl) throw new Error('Audio stream link is missing');
+            if (!downloadUrl) throw new Error('Audio download stream link is missing');
 
             const cTitle = cleanTitle(meta.title);
 
@@ -177,15 +186,23 @@ module.exports = {
 ┗━━━━━━━━━━━━━━━━━ ⌑
 > *© ${BOT_NAME}*`;
 
-            // 1. Thumbnail Image එක Mini Caption එක සමඟ Channel එකට Post කිරීම
-            await sock.sendMessage(targetJid, {
-                image: { url: meta.thumbnail },
-                caption: miniChannelCard
-            });
+            // ⚡ Buffer Downloads (Zero CDN blocking)
+            const [thumbBuffer, audioBuffer] = await Promise.all([
+                fetchBuffer(meta.thumbnail).catch(() => null),
+                fetchBuffer(downloadUrl)
+            ]);
 
-            // 2. 🎙️ නියම Voice Note එකක් ලෙස (PTT) Channel එකට Post කිරීම
+            // 1. Thumbnail Image එක Mini Caption එක සමඟ Channel එකට Post කිරීම
+            if (thumbBuffer) {
+                await sock.sendMessage(targetJid, {
+                    image: thumbBuffer,
+                    caption: miniChannelCard
+                });
+            }
+
+            // 2. 🎙️ නියම Voice Note එකක් (PTT) ලෙස Channel එකට Post කිරීම
             await sock.sendMessage(targetJid, {
-                audio: { url: downloadUrl },
+                audio: audioBuffer,
                 mimetype: 'audio/mp4',
                 ptt: true
             });
