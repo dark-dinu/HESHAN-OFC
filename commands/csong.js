@@ -1,83 +1,53 @@
-const https = require('https');
-const http = require('http');
+const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const https = require('https');
 const { exec } = require('child_process');
+
+// ⚡ Render.com Linux Environment එකට ගැළපෙන Automatic FFmpeg Binary Path Configuration
+let ffmpegPath = 'ffmpeg';
+try {
+    const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
+    ffmpegPath = ffmpegInstaller.path;
+} catch (e) {
+    ffmpegPath = 'ffmpeg';
+}
 
 const API_KEY = 'chama_api_ec9848130d1aea209f08fb85e0b4720f';
 
-// ⚡ Helper: FFmpeg මඟින් ඕනෑම Audio Buffer එකක් නියම WhatsApp Voice Note (OGG Opus) බවට පත් කිරීම
+// 🎙️ Helper: MP3 Buffer එක WhatsApp Channels වලට සහය දක්වන Real OGG Opus Voice Note එකක් බවට පත් කිරීම
 function convertToWhatsAppVoice(inputBuffer) {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
         const tempId = Date.now() + '_' + Math.random().toString(36).substring(7);
         const tempInput = path.join(os.tmpdir(), `input_${tempId}.mp3`);
         const tempOutput = path.join(os.tmpdir(), `output_${tempId}.opus`);
 
-        fs.writeFile(tempInput, inputBuffer, (err) => {
-            if (err) return resolve(inputBuffer);
+        fs.writeFileSync(tempInput, inputBuffer);
 
-            // WhatsApp Voice Note Codec: libopus, 48kHz, 1 channel (mono)
-            const cmd = `ffmpeg -y -i "${tempInput}" -c:a libopus -b:a 64k -vbr on -compression_level 10 -ar 48000 -ac 1 "${tempOutput}"`;
+        // WhatsApp Real Voice Note Codec: libopus, 48kHz, mono
+        const cmd = `"${ffmpegPath}" -y -i "${tempInput}" -c:a libopus -b:a 64k -vbr on -compression_level 10 -ar 48000 -ac 1 "${tempOutput}"`;
 
-            exec(cmd, (error) => {
-                try { if (fs.existsSync(tempInput)) fs.unlinkSync(tempInput); } catch (e) {}
+        exec(cmd, (error) => {
+            try { if (fs.existsSync(tempInput)) fs.unlinkSync(tempInput); } catch (e) {}
 
-                if (error) {
-                    console.warn('[FFMPEG WARN]:', error.message);
-                    return resolve(inputBuffer); // FFmpeg නැතිනම් fallback
-                }
+            if (error) {
+                console.warn('[FFMPEG CONVERT ERROR]:', error.message);
+                return resolve(inputBuffer);
+            }
 
-                try {
-                    if (fs.existsSync(tempOutput)) {
-                        const outputBuffer = fs.readFileSync(tempOutput);
-                        fs.unlinkSync(tempOutput);
-                        return resolve(outputBuffer);
-                    }
-                } catch (readErr) {}
-
+            try {
+                const outputBuffer = fs.readFileSync(tempOutput);
+                if (fs.existsSync(tempOutput)) fs.unlinkSync(tempOutput);
+                resolve(outputBuffer);
+            } catch (readErr) {
                 resolve(inputBuffer);
-            });
+            }
         });
     });
 }
 
-// Native JSON Fetcher
-function fetchJson(url) {
-    return new Promise((resolve, reject) => {
-        const client = url.startsWith('https') ? https : http;
-        client.get(url, (res) => {
-            let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => {
-                try { resolve(JSON.parse(data)); } catch (e) { reject(new Error('Invalid JSON')); }
-            });
-            res.on('error', err => reject(err));
-        }).on('error', err => reject(err));
-    });
-}
-
-// Redirect-aware Buffer Downloader
-function fetchBuffer(url) {
-    return new Promise((resolve, reject) => {
-        const client = url.startsWith('https') ? https : http;
-        client.get(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            }
-        }, (res) => {
-            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                return fetchBuffer(res.headers.location).then(resolve).catch(reject);
-            }
-            const chunks = [];
-            res.on('data', chunk => chunks.push(chunk));
-            res.on('end', () => resolve(Buffer.concat(chunks)));
-            res.on('error', err => reject(err));
-        }).on('error', err => reject(err));
-    });
-}
-
-// Fast YouTube Scraper (No extra npm needed)
+// YouTube Search Scraper
 function searchYouTube(query) {
     return new Promise((resolve) => {
         const isUrl = /(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com|youtu\.be)/i.test(query);
@@ -106,7 +76,7 @@ function searchYouTube(query) {
                                 videoId: vr.videoId,
                                 url: `https://www.youtube.com/watch?v=${vr.videoId}`,
                                 title: vr.title?.runs?.[0]?.text || 'Channel Song',
-                                duration: vr.lengthText?.simpleText || '4:00',
+                                duration: vr.lengthText?.simpleText || '3:45',
                                 thumbnail: `https://i.ytimg.com/vi/${vr.videoId}/hqdefault.jpg`
                             });
                         }
@@ -152,8 +122,8 @@ module.exports = {
             }
         }
 
-        // 🎯 පරණ කේතයේ ක්‍රමයට Invite Code එකෙන් /392 වැනි post IDs ඉවත් කිරීම
-        const inviteCode = channelLink.split("whatsapp.com/channel/")[1]?.split("/")[0]?.split("?")[0]?.trim();
+        // 🎯 Link එක අග ඇති /392 වැනි Post ID ඉවත් කර නියම Invite Code එක පමණක් ගැනීම
+        const inviteCode = channelLink.split('whatsapp.com/channel/')[1]?.split('/')[0]?.split('?')[0]?.trim();
         if (!inviteCode) {
             return sock.sendMessage(from, { text: '❌ වලංගු WhatsApp Channel Link එකක් ලබාදෙන්න!' }, { quoted: msg });
         }
@@ -161,6 +131,7 @@ module.exports = {
         sock.sendMessage(from, { react: { text: '⏳', key: msg.key } }).catch(() => {});
 
         try {
+            // Channel JID එක ලබා ගැනීම
             const channelMeta = await sock.newsletterMetadata('invite', inviteCode);
             const channelJid = channelMeta?.id;
 
@@ -186,38 +157,41 @@ module.exports = {
 
             for (const ep of endpoints) {
                 try {
-                    const res = await fetchJson(ep);
-                    audioDownloadUrl = res?.data?.direct_url || res?.data?.download_url || res?.data?.download_link || res?.download_link;
+                    const res = await axios.get(ep, { timeout: 15000 });
+                    audioDownloadUrl = res.data?.data?.direct_url || res.data?.data?.download_url || res.data?.direct_url || res.data?.download_link;
                     if (audioDownloadUrl) break;
                 } catch (e) {}
             }
 
             if (!audioDownloadUrl) {
-                throw new Error('Audio Download link ලබාගැනීමට නොහැකි විය.');
+                throw new Error('Audio Download stream link ලබාගැනීමට නොහැකි විය.');
             }
 
-            // Audio Buffer කර ගැනීම
-            const rawBuffer = await fetchBuffer(audioDownloadUrl);
-
-            // 3. Local FFmpeg මඟින් Original WhatsApp Voice Note (OGG Opus) බවට Convert කිරීම
+            // 3. Audio Buffer කරගෙන FFmpeg මඟින් OGG Opus බවට Convert කිරීම
+            const rawRes = await axios.get(audioDownloadUrl, {
+                responseType: 'arraybuffer',
+                timeout: 45000,
+                headers: { 'User-Agent': 'Mozilla/5.0' }
+            });
+            const rawBuffer = Buffer.from(rawRes.data);
             const voiceBuffer = await convertToWhatsAppVoice(rawBuffer);
 
-            // 4. STEP 1: ලස්සන Mini Card Banner එක Channel එකට යැවීම
+            // 4. STEP 1: ලස්සන Mini Aesthetic Card එක Channel එකට යැවීම
             const cardCaption = 
-`🎶 *“ ${video.title} ”*
+`🥰⃝🎶 *“ ${video.title} ”*
 
 0:00 ◁◁  II  ▷▷ ${video.duration}
 
-Use Headphones For Best Experience.... 🎧🎵
+Use Headphones For Best Experience.... 🧚‍♀️🎵
 
-| ⚡ *${BOT_NAME}*`;
+| ☘️ *${BOT_NAME}*`;
 
             await sock.sendMessage(channelJid, {
                 image: { url: video.thumbnail },
                 caption: cardCaption
             });
 
-            // 5. STEP 2: Real Playable Voice Note එක (OGG Opus) Channel එකට යැවීම
+            // 5. STEP 2: Real Playable Voice Note (OGG Opus) එක Channel එකට යැවීම
             await sock.sendMessage(channelJid, {
                 audio: voiceBuffer,
                 mimetype: 'audio/ogg; codecs=opus',
