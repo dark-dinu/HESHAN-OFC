@@ -1,4 +1,4 @@
-const fs = require('fs');
+Const fs = require('fs');
 const path = require('path');
 const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
 
@@ -12,6 +12,7 @@ if (fs.existsSync(commandsDir)) {
             try {
                 const cmd = require(path.join(commandsDir, file));
                 if (cmd.name) commands.set(cmd.name.toLowerCase(), cmd);
+                // ⚡ Aliases (setdp, getdp ආදිය) RAM Map එකට register කිරීම
                 if (cmd.aliases && Array.isArray(cmd.aliases)) {
                     cmd.aliases.forEach(alias => commands.set(alias.toLowerCase(), cmd));
                 }
@@ -23,13 +24,13 @@ if (fs.existsSync(commandsDir)) {
     console.log(`⚡ [ENGINE] Pre-loaded ${commands.size} commands into RAM!`);
 }
 
-// Memory Stores (RAM Optimized)
+// Memory Stores
 const messageStore = new Map();
 const mediaCacheStore = new Map();
 const viewOnceStore = new Map();
 const statusStore = new Map();
-const MAX_MSG_STORE = 500;
-const MAX_MEDIA_STORE = 25;
+const MAX_MSG_STORE = 1000;
+const MAX_MEDIA_STORE = 40;
 
 async function downloadMedia(content, type) {
     try {
@@ -43,18 +44,6 @@ async function downloadMedia(content, type) {
     }
 }
 
-// Helper: Ephemeral, ViewOnce ඇතුළු සියලු Wrapper Layers ඉවත් කර සැබෑ Message Object එක ලබා ගැනීම
-function unwrapMessage(msg) {
-    let m = msg;
-    if (!m) return null;
-    if (m.ephemeralMessage?.message) m = m.ephemeralMessage.message;
-    if (m.viewOnceMessage?.message) m = m.viewOnceMessage.message;
-    if (m.viewOnceMessageV2?.message) m = m.viewOnceMessageV2.message;
-    if (m.viewOnceMessageV2Extension?.message) m = m.viewOnceMessageV2Extension.message;
-    if (m.documentWithCaptionMessage?.message) m = m.documentWithCaptionMessage.message;
-    return m;
-}
-
 const statusKeywords = [
     'ඕනි', 'ඔනි', 'දෙන්න', 'දියන්', 'දීපන්', 'දාපන්', 'එවන්න', 'එවපන්',
     'oni', 'one', 'denna', 'diyan', 'dipan', 'dapan', 'diyanko', 
@@ -62,6 +51,7 @@ const statusKeywords = [
     '.save', '.send'
 ];
 
+// Anti View-Once Emoji Unlock List
 const viewOnceEmojis = [
     '🤭', '😁', '❤️', '😭', '😼', '😚', '😘', '👤', '😹', '🥵',
     '💔', '🫡', '👍', '🤣', '😏', '😌', '👎', '🙈', '🙏', '🤝'
@@ -113,7 +103,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
     });
 
     // ==============================================================
-    // 🗑️ ANTI-DELETE RECOVERY ENGINE
+    // 🗑️ ANTI-DELETE RECOVERY ENGINE (TARGET: ME / FROM)
     // ==============================================================
     async function recoverDeletedMessage(deletedId) {
         if (!global.botSettings?.antiDelete || !deletedId) return;
@@ -125,13 +115,17 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         const senderNum = senderJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
         const originChat = cached.key.remoteJid;
 
+        // 🎯 Send Target Decision: 'from' (Current Chat) vs 'me' (Developer Inbox)
         const destMode = global.botSettings?.antiSendDest || 'me';
         const sendTarget = (destMode === 'from') ? originChat : devs[0];
 
         const alertText = `🚮 *Deleted Message Recovered!*\n👤 *From:* +${senderNum}\n📍 *Chat:* ${originChat.endsWith('@g.us') ? 'Group' : 'Inbox'}`;
 
-        const m = unwrapMessage(cached.message);
-        if (!m) return;
+        let m = cached.message;
+        if (m.ephemeralMessage?.message) m = m.ephemeralMessage.message;
+        if (m.viewOnceMessage?.message) m = m.viewOnceMessage.message;
+        if (m.viewOnceMessageV2?.message) m = m.viewOnceMessageV2.message;
+
         const type = Object.keys(m)[0];
 
         try {
@@ -170,8 +164,9 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
     // 👁️‍🗨️ VIEW-ONCE UNLOCK HELPER
     // ==============================================================
     async function sendUnlockedViewOnce(targetMessage, replyJid, quotedMsgKey) {
-        const inner = unwrapMessage(targetMessage);
-        if (!inner) return false;
+        let vo = targetMessage;
+        if (vo.ephemeralMessage?.message) vo = vo.ephemeralMessage.message;
+        const inner = vo.viewOnceMessage?.message || vo.viewOnceMessageV2?.message || vo.viewOnceMessageV2Extension?.message || vo;
 
         const targetKey = Object.keys(inner)[0];
         if (!targetKey || (!targetKey.includes('image') && !targetKey.includes('video') && !targetKey.includes('audio'))) return false;
@@ -194,7 +189,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
     }
 
     // ==============================================================
-    // 🤩 2. REACTION LISTENER
+    // 🤩 2. REACTION LISTENER (EMOJI VIEW-ONCE UNLOCK)
     // ==============================================================
     sock.ev.on('messages.reaction', async (reactions) => {
         for (const r of reactions) {
@@ -241,25 +236,22 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             return;
         }
 
-        const rawMsg = unwrapMessage(msg.message);
-        if (!rawMsg) return;
-
-        // 📥 Smart Message & Media Caching (Anti-Delete ON නම් පමණක් Cache කරයි - 80% RAM ඉතිරි වේ)
+        // 📥 Message & Media Caching
         if (msg.key?.id) {
             if (messageStore.size >= MAX_MSG_STORE) messageStore.delete(messageStore.keys().next().value);
-            messageStore.set(msg.key.id, { key: msg.key, message: rawMsg, pushName: msg.pushName });
+            messageStore.set(msg.key.id, { key: msg.key, message: msg.message, pushName: msg.pushName });
 
-            if (global.botSettings?.antiDelete) {
-                const mType = Object.keys(rawMsg)[0];
-                if (['imageMessage', 'videoMessage', 'audioMessage', 'stickerMessage'].includes(mType)) {
-                    setImmediate(async () => {
-                        const buf = await downloadMedia(rawMsg[mType], mType.replace('Message', ''));
-                        if (buf) {
-                            if (mediaCacheStore.size >= MAX_MEDIA_STORE) mediaCacheStore.delete(mediaCacheStore.keys().next().value);
-                            mediaCacheStore.set(msg.key.id, buf);
-                        }
-                    });
-                }
+            let rawMsg = msg.message;
+            if (rawMsg.ephemeralMessage?.message) rawMsg = rawMsg.ephemeralMessage.message;
+            const mType = Object.keys(rawMsg)[0];
+            if (['imageMessage', 'videoMessage', 'audioMessage', 'stickerMessage'].includes(mType)) {
+                setImmediate(async () => {
+                    const buf = await downloadMedia(rawMsg[mType], mType.replace('Message', ''));
+                    if (buf) {
+                        if (mediaCacheStore.size >= MAX_MEDIA_STORE) mediaCacheStore.delete(mediaCacheStore.keys().next().value);
+                        mediaCacheStore.set(msg.key.id, buf);
+                    }
+                });
             }
         }
 
@@ -275,10 +267,10 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
                       devs.includes(rawSender.split(':')[0] + '@' + rawSender.split('@')[1]) ||
                       (cleanSender && cleanSender === botUserNumber);
 
-        // 👁️‍🗨️ VIEW-ONCE ENGINE
-        const viewOnce = msg.message.viewOnceMessage?.message || 
-                         msg.message.viewOnceMessageV2?.message || 
-                         msg.message.viewOnceMessageV2Extension?.message;
+        // 👁️‍🗨️ VIEW-ONCE ENGINE (TARGET: ME / FROM)
+        let m = msg.message;
+        if (m.ephemeralMessage?.message) m = m.ephemeralMessage.message;
+        const viewOnce = m.viewOnceMessage?.message || m.viewOnceMessageV2?.message || m.viewOnceMessageV2Extension?.message;
 
         if (viewOnce) {
             if (msg.key?.id) {
@@ -286,6 +278,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
                 viewOnceStore.set(msg.key.id, { message: viewOnce, msg });
             }
 
+            // Auto Forward to Target (me vs from)
             if (global.botSettings?.antiViewOnce && !isMe) {
                 setImmediate(async () => {
                     const targetKey = Object.keys(viewOnce)[0];
@@ -302,6 +295,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
                             sock.sendMessage(sendTarget, { text: infoHeader }).catch(() => {});
                             sock.sendMessage(sendTarget, { audio: buffer, mimetype: 'audio/mp4', ptt: true }).catch(() => {});
                         }
+                        console.log(`✅ [ANTI VIEW-ONCE] Forwarded to: ${sendTarget}`);
                     }
                 });
             }
@@ -311,12 +305,12 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         if (global.botSettings?.mode === 'private' && !isDev) return;
         if (global.botSettings?.mode === 'group' && !remoteJid.endsWith('@g.us') && !isDev) return;
 
-        const messageType = Object.keys(rawMsg)[0];
-        let text = rawMsg.conversation || rawMsg[messageType]?.text || rawMsg[messageType]?.caption || '';
+        const messageType = Object.keys(msg.message)[0];
+        let text = msg.message.conversation || msg.message[messageType]?.text || msg.message[messageType]?.caption || '';
         text = text.trim();
 
-        const contextInfo = rawMsg[messageType]?.contextInfo;
-        const quotedMsg = contextInfo?.quotedMessage ? unwrapMessage(contextInfo.quotedMessage) : null;
+        const contextInfo = msg.message[messageType]?.contextInfo;
+        const quotedMsg = contextInfo?.quotedMessage;
         const stanzaId = contextInfo?.stanzaId;
         const isStatusReply = contextInfo?.remoteJid === 'status@broadcast';
 
@@ -335,7 +329,9 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
 
         // Status Saver Engine
         if (statusKeywords.includes(text.toLowerCase()) && (quotedMsg || isStatusReply)) {
-            let target = (statusStore && stanzaId ? unwrapMessage(statusStore.get(stanzaId)?.message) : null) || quotedMsg;
+            let target = (statusStore && stanzaId ? statusStore.get(stanzaId)?.message : null) || quotedMsg;
+            if (target?.viewOnceMessage?.message) target = target.viewOnceMessage.message;
+            if (target?.viewOnceMessageV2?.message) target = target.viewOnceMessageV2.message;
 
             if (target) {
                 if (target.videoMessage) {
@@ -363,7 +359,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             }
         }
 
-        // 🎵 Song Reply Selector (1, 2, 3)
+        // 🎵 Song Reply Selector (1, 2, 3 - Audio / Document / Voice)
         if (['1', '2', '3', '1️⃣', '2️⃣', '3️⃣'].includes(text) && quotedMsg) {
             const songCmd = commands.get('song');
             if (songCmd && typeof songCmd.handleReply === 'function') {
@@ -372,7 +368,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             }
         }
 
-        // Setting Shortcuts
+        // Setting Shortcuts (1.1, 9.1, 9.2 ආදිය)
         if (isDev && validSettingNumbers.includes(text.toLowerCase())) {
             const settingCmd = commands.get('setting');
             if (settingCmd) {
@@ -389,6 +385,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         const cmd = commands.get(commandName);
         if (cmd) {
             try {
+                // ⚡ commandName එක pass වන බැවින් dp.js හි getdp / setdp දෙකම එකවර හඳුනාගනී
                 await cmd.execute(sock, msg, args, isDev, BOT_NAME, cleanSender || botUserNumber, commandName);
             } catch (err) {
                 console.error(`Command [${commandName}] execution error:`, err.message);
