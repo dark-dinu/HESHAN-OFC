@@ -5,6 +5,7 @@ const http = require('http');
 const API_BASE_MP3 = 'https://api.chamindu.site/api/v1/media/ytmp3/dl';
 const API_BASE_MP4 = 'https://api.chamindu.site/api/v1/media/ytmp4/dl';
 const API_KEY = 'chama_api_ec9848130d1aea209f08fb85e0b4720f';
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 // RAM Safe Selection Store
 const songSessionStore = new Map();
@@ -12,7 +13,10 @@ const songSessionStore = new Map();
 function fetchJson(url) {
     return new Promise((resolve, reject) => {
         const client = url.startsWith('https') ? https : http;
-        client.get(url, (res) => {
+        const req = client.get(url, { headers: { 'User-Agent': UA } }, (res) => {
+            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                return fetchJson(res.headers.location).then(resolve).catch(reject);
+            }
             let data = '';
             res.on('data', chunk => data += chunk);
             res.on('end', () => {
@@ -23,7 +27,27 @@ function fetchJson(url) {
                 }
             });
             res.on('error', err => reject(err));
-        }).on('error', err => reject(err));
+        });
+        req.on('error', err => reject(err));
+        req.setTimeout(30000, () => { req.destroy(); reject(new Error('API request timeout')); });
+    });
+}
+
+// ⚡ Buffer Downloader (CDN Block වීම් සහ Stream Failure 100% වළක්වයි)
+function downloadBuffer(url) {
+    return new Promise((resolve, reject) => {
+        const client = url.startsWith('https') ? https : http;
+        const req = client.get(url, { headers: { 'User-Agent': UA } }, (res) => {
+            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                return downloadBuffer(res.headers.location).then(resolve).catch(reject);
+            }
+            const chunks = [];
+            res.on('data', chunk => chunks.push(chunk));
+            res.on('end', () => resolve(Buffer.concat(chunks)));
+            res.on('error', err => reject(err));
+        });
+        req.on('error', err => reject(err));
+        req.setTimeout(60000, () => { req.destroy(); reject(new Error('Download timeout')); });
     });
 }
 
@@ -43,7 +67,8 @@ function scrapeYouTubeMeta(query) {
 
         https.get(searchUrl, {
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                'User-Agent': UA,
+                'Accept-Language': 'en-US,en;q=0.9'
             }
         }, (res) => {
             let html = '';
@@ -83,9 +108,10 @@ function scrapeYouTubeMeta(query) {
 }
 
 async function getAudioDownloadUrl(ytUrl) {
-    let res = await fetchJson(`${API_BASE_MP3}?url=${encodeURIComponent(ytUrl)}&quality=128&api_key=${API_KEY}`).catch(() => null);
+    const enc = encodeURIComponent(ytUrl);
+    let res = await fetchJson(`${API_BASE_MP3}?url=${enc}&quality=128&api_key=${API_KEY}`).catch(() => null);
     if (!res || !res.status || (!res.data?.download_link && !res.data?.direct_url && !res.download_link)) {
-        res = await fetchJson(`${API_BASE_MP4}?url=${encodeURIComponent(ytUrl)}&quality=360&api_key=${API_KEY}`).catch(() => null);
+        res = await fetchJson(`${API_BASE_MP4}?url=${enc}&quality=360&api_key=${API_KEY}`).catch(() => null);
     }
     const info = res?.data || res;
     return info?.download_link || info?.direct_url || null;
@@ -102,7 +128,7 @@ module.exports = {
         const quotedText = contextInfo?.quotedMessage?.conversation || 
                            contextInfo?.quotedMessage?.extendedTextMessage?.text || '';
 
-        const query = (args.join(' ') + ' ' + quotedText).trim();
+        const query = ((args || []).join(' ') + ' ' + quotedText).trim();
 
         if (!query) {
             return sock.sendMessage(chatJid, { 
@@ -175,30 +201,33 @@ module.exports = {
             const downloadUrl = await getAudioDownloadUrl(session.ytUrl);
             if (!downloadUrl) throw new Error('Could not generate download link');
 
-            const cleanTitle = session.title.replace(/[^a-zA-Z0-9 ]/g, '').slice(0, 30).trim() || 'Song';
+            const audioBuffer = await downloadBuffer(downloadUrl);
+            if (!audioBuffer || audioBuffer.length < 5000) throw new Error('Audio download failed or file empty');
 
-            // 1️⃣ PURE AUDIO (කිසිදු Link Box / Card එකක් නැති පිරිසිදු Audio එක)
+            const safeTitle = session.title.replace(/[\/\\?%*:|"<>]/g, '').slice(0, 40).trim() || 'Song';
+
+            // 1️⃣ PURE AUDIO
             if (choice === '1') {
                 await sock.sendMessage(chatJid, {
-                    audio: { url: downloadUrl },
+                    audio: audioBuffer,
                     mimetype: 'audio/mpeg',
                     ptt: false,
-                    fileName: `${cleanTitle}.mp3`
+                    fileName: `${safeTitle}.mp3`
                 }, { quoted: msg });
             } 
             // 2️⃣ DOCUMENT
             else if (choice === '2') {
                 await sock.sendMessage(chatJid, {
-                    document: { url: downloadUrl },
+                    document: audioBuffer,
                     mimetype: 'audio/mpeg',
-                    fileName: `${cleanTitle}.mp3`,
+                    fileName: `${safeTitle}.mp3`,
                     caption: `🎵 *${session.title}*\n> © ${BOT_NAME}`
                 }, { quoted: msg });
             } 
             // 3️⃣ VOICE NOTE (PTT)
             else if (choice === '3') {
                 await sock.sendMessage(chatJid, {
-                    audio: { url: downloadUrl },
+                    audio: audioBuffer,
                     mimetype: 'audio/mp4',
                     ptt: true,
                     waveform: Buffer.from([0, 15, 35, 60, 80, 95, 70, 50, 30, 15, 0, 20, 45, 75, 90, 80, 50, 20, 0, 10, 30, 60, 95, 100, 75, 45, 20, 0])
