@@ -6,7 +6,7 @@ const API_BASE_MP3 = 'https://api.chamindu.site/api/v1/media/ytmp3/dl';
 const API_BASE_MP4 = 'https://api.chamindu.site/api/v1/media/ytmp4/dl';
 const API_KEY = 'chama_api_ec9848130d1aea209f08fb85e0b4720f';
 
-// RAM Safe Selection Store (පණිවිඩ 40කට සීමා කර ඇත)
+// RAM Safe Selection Store
 const songSessionStore = new Map();
 
 function fetchJson(url) {
@@ -27,7 +27,6 @@ function fetchJson(url) {
     });
 }
 
-// Format Views (e.g., 317600 -> 317.6K)
 function formatViews(viewsStr) {
     if (!viewsStr) return 'N/A';
     const num = parseInt(viewsStr.replace(/[^0-9]/g, ''));
@@ -37,7 +36,6 @@ function formatViews(viewsStr) {
     return num.toString();
 }
 
-// ⚡ Ultra-fast Native YouTube Scraper (Title, Views, Duration, Ago, Author ලබාගැනීම)
 function scrapeYouTubeMeta(query) {
     return new Promise((resolve) => {
         const isUrl = /(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com|youtu\.be)/i.test(query);
@@ -84,7 +82,6 @@ function scrapeYouTubeMeta(query) {
     });
 }
 
-// Chamindu API හරහා Direct Download Stream එක ලබාගැනීම
 async function getAudioDownloadUrl(ytUrl) {
     let res = await fetchJson(`${API_BASE_MP3}?url=${encodeURIComponent(ytUrl)}&quality=128&api_key=${API_KEY}`).catch(() => null);
     if (!res || !res.status || (!res.data?.download_link && !res.data?.direct_url && !res.download_link)) {
@@ -98,7 +95,7 @@ module.exports = {
     name: 'song',
     aliases: ['play', 'ytmp3'],
     
-    // 🎵 1. .song command එක run වන කොටස (Card එක යැවීම)
+    // 🎵 Card එක යැවීම
     execute: async (sock, msg, args, isDev, BOT_NAME, cleanSender) => {
         const chatJid = msg.key.remoteJid;
         const contextInfo = msg.message?.extendedTextMessage?.contextInfo;
@@ -119,7 +116,6 @@ module.exports = {
             const meta = await scrapeYouTubeMeta(query);
             if (!meta) throw new Error('Song not found on YouTube!');
 
-            // 🎵⃝💞 ඔයා ඉල්ලපු ආකර්ෂණීය Card එක
             const songCard = 
 `🎵⃝💞┅┅┅┅┅┅┅┅┅┅┅┅┅┅┅❍
 ┃ *ꜱᴏɴɢ ᴅᴏᴡɴʟᴏᴀᴅᴇʀ ♫*
@@ -143,13 +139,11 @@ module.exports = {
                 caption: songCard
             }, { quoted: msg });
 
-            // Session Cache එකේ Save කිරීම (Reply එක හඳුනාගැනීමට)
             if (songSessionStore.size >= 40) songSessionStore.delete(songSessionStore.keys().next().value);
             songSessionStore.set(sentCard.key.id, {
                 ytUrl: meta.url,
                 title: meta.title,
-                author: meta.author,
-                thumbnail: meta.thumbnail
+                author: meta.author
             });
 
             sock.sendMessage(chatJid, { react: { text: '🎶', key: msg.key } }).catch(() => {});
@@ -161,7 +155,7 @@ module.exports = {
         }
     },
 
-    // 🔢 2. Card එකට 1, 2, 3 Reply කළ විට ක්‍රියාත්මක වන කොටස
+    // 🔢 1, 2, 3 Reply හසුරුවන කොටස
     handleReply: async (sock, msg, choiceText, BOT_NAME) => {
         const chatJid = msg.key.remoteJid;
         const contextInfo = msg.message?.extendedTextMessage?.contextInfo || 
@@ -183,22 +177,13 @@ module.exports = {
 
             const cleanTitle = session.title.replace(/[^a-zA-Z0-9 ]/g, '').slice(0, 30).trim() || 'Song';
 
-            // 1️⃣ AUDIO
+            // 1️⃣ PURE AUDIO (කිසිදු Link Box / Card එකක් නැති පිරිසිදු Audio එක)
             if (choice === '1') {
                 await sock.sendMessage(chatJid, {
                     audio: { url: downloadUrl },
                     mimetype: 'audio/mpeg',
                     ptt: false,
-                    fileName: `${cleanTitle}.mp3`,
-                    contextInfo: {
-                        externalAdReply: {
-                            title: session.title,
-                            body: session.author,
-                            thumbnailUrl: session.thumbnail,
-                            mediaType: 1,
-                            renderLargerThumbnail: false
-                        }
-                    }
+                    fileName: `${cleanTitle}.mp3`
                 }, { quoted: msg });
             } 
             // 2️⃣ DOCUMENT
