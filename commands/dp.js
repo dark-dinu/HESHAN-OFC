@@ -1,4 +1,4 @@
-const { downloadContentFromMessage, jidNormalizedUser } = require('@whiskeysockets/baileys');
+const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
 const https = require('https');
 const http = require('http');
 
@@ -14,7 +14,7 @@ function getRemainingCooldown() {
     return 0;
 }
 
-// URL එකකින් Image Buffer එකක් ලබාගැනීම
+// URL එකකින් Image Buffer එකක් Stream කිරීම
 function fetchBufferFromUrl(url) {
     return new Promise((resolve, reject) => {
         const client = url.startsWith('https') ? https : http;
@@ -27,7 +27,7 @@ function fetchBufferFromUrl(url) {
     });
 }
 
-// Message එකකින් Image Message එක සොයාගැනීම
+// Message එකකින් Image Message එක හඳුනාගැනීම
 function extractImageMessage(msg) {
     let m = msg.message;
     if (m?.ephemeralMessage?.message) m = m.ephemeralMessage.message;
@@ -47,26 +47,68 @@ function extractImageMessage(msg) {
     return null;
 }
 
-// 🖼️ 100% Working Full DP Generator (Jimp Canvas Scaler)
+// 🖼️ 100% Ultra-Fast No-Crop Full DP Generator (Jimp Aesthetic Blur)
 async function generateFullDpBuffer(rawBuffer) {
     const Jimp = require('jimp');
     const image = await Jimp.read(rawBuffer);
-    const width = image.getWidth();
-    const height = image.getHeight();
+    
+    let w = image.bitmap.width || image.getWidth();
+    let h = image.bitmap.height || image.getHeight();
+    const maxDimension = Math.max(w, h);
 
-    // 720x720 Square Canvas එකක් සාදා පින්තූරය නොකැපෙන සේ scale කර මැදට ගැනීම
-    const max = Math.max(width, height);
-    const min = Math.min(width, height);
+    // RAM එක පිරීම වැළැක්වීමට අධික Resolution (4K+) නම් Safe Scale කිරීම
+    if (maxDimension > 1200) {
+        image.scale(1200 / maxDimension);
+        w = image.bitmap.width || image.getWidth();
+        h = image.bitmap.height || image.getHeight();
+    }
 
-    // Image එක square නොවේ නම් background එකක් සාදා මැදට තැබීම
-    const canvas = new Jimp(max, max, 0x000000FF); // කළු පසුබිම
-    const x = Math.floor((max - width) / 2);
-    const y = Math.floor((max - height) / 2);
+    const max = Math.max(w, h);
 
-    canvas.composite(image, x, y);
-    canvas.resize(720, 720); // WhatsApp Best HD Resolution
+    // 1:1 Canvas එකක් සාදා දෙපැත්තට Soft Blur Background එකක් දමා මුළු Photo එක මැදට ගැනීම
+    const background = image.clone();
+    background.resize(max, max);
+    background.blur(10);
 
-    return await canvas.getBufferAsync(Jimp.MIME_JPEG);
+    const x = Math.floor((max - w) / 2);
+    const y = Math.floor((max - h) / 2);
+    background.composite(image, x, y);
+
+    // WhatsApp Native 720x720 HD Profile Picture Resolution
+    background.resize(720, 720);
+
+    return await background.getBufferAsync(Jimp.MIME_JPEG);
+}
+
+// ⚡ WhatsApp Profile Picture Updater (Double-Fallback Engine)
+async function applyProfilePicture(sock, targetJid, imageBuffer) {
+    const isGroup = targetJid.endsWith('@g.us');
+
+    // 1st Method: Native Baileys Method
+    try {
+        await sock.updateProfilePicture(targetJid, imageBuffer);
+        return true;
+    } catch (err1) {
+        console.log('[DP UPDATE] Method 1 fallback to Direct IQ:', err1.message);
+    }
+
+    // 2nd Method: Direct WhatsApp IQ Stanza (Pure Protocol)
+    const attrs = isGroup
+        ? { to: targetJid, type: 'set', xmlns: 'w:profile:picture' }
+        : { to: '@s.whatsapp.net', target: targetJid, type: 'set', xmlns: 'w:profile:picture' };
+
+    await sock.query({
+        tag: 'iq',
+        attrs: attrs,
+        content: [
+            {
+                tag: 'picture',
+                attrs: { type: 'image' },
+                content: imageBuffer
+            }
+        ]
+    });
+    return true;
 }
 
 module.exports = {
@@ -80,8 +122,10 @@ module.exports = {
                         msg.message?.imageMessage?.caption || '';
         const command = (cmdName || rawText.trim().slice(1).split(/\s+/)[0] || 'dp').toLowerCase();
 
-        // Normalized Bot JID (LID සහ PN දෙකටම ගැලපෙන සේ)
-        const botJid = jidNormalizedUser(sock.user?.id);
+        // Device ID (:1/:2) ඉවත් කළ පිරිසිදු Bot JID එක
+        const rawBotId = sock.user?.id || '';
+        const cleanBotNumber = rawBotId.split(':')[0].split('@')[0].replace(/[^0-9]/g, '');
+        const botJid = `${cleanBotNumber}@s.whatsapp.net`;
 
         // =====================================================================
         // 🖼️ 1. NO-CROP FULL DP (.setfulldp / .fulldp) - OWNER ONLY
@@ -100,7 +144,7 @@ module.exports = {
 
             const imgMsg = extractImageMessage(msg);
             if (!imgMsg) {
-                return sock.sendMessage(chatJid, { text: '⚠️ Please reply to an image with *.setfulldp*' }, { quoted: msg });
+                return sock.sendMessage(chatJid, { text: '⚠️ Please reply to an image or send an image with caption *.setfulldp*' }, { quoted: msg });
             }
 
             sock.sendMessage(chatJid, { react: { text: '⏳', key: msg.key } }).catch(() => {});
@@ -110,36 +154,23 @@ module.exports = {
                 let rawBuffer = Buffer.from([]);
                 for await (const chunk of stream) rawBuffer = Buffer.concat([rawBuffer, chunk]);
 
-                // Jimp මඟින් 1:1 HD Full Canvas එකක් සකස් කිරීම
+                // Jimp මඟින් සම්පූර්ණ Photo එකම 720x720 HD Canvas එකක් බවට පත් කිරීම
                 const fullBuffer = await generateFullDpBuffer(rawBuffer);
 
-                // ⚡ Baileys updateProfilePicture මඟහැර DIRECT WHATSAPP IQ STANZA එකට යැවීම
-                await sock.query({
-                    tag: 'iq',
-                    attrs: {
-                        to: botJid,
-                        type: 'set',
-                        xmlns: 'w:profile:picture'
-                    },
-                    content: [
-                        {
-                            tag: 'picture',
-                            attrs: { type: 'image' },
-                            content: fullBuffer
-                        }
-                    ]
-                });
+                // Profile Picture Apply කිරීම
+                await applyProfilePicture(sock, botJid, fullBuffer);
 
                 lastDpChangeTime = Date.now();
                 rawBuffer = null;
 
                 sock.sendMessage(chatJid, { react: { text: '👑', key: msg.key } }).catch(() => {});
                 return sock.sendMessage(chatJid, { 
-                    text: `👑 *${BOT_NAME}* Full DP updated successfully without cropping!` 
+                    text: `👑 *${BOT_NAME}* Full DP updated successfully! (Zero Cropping)` 
                 }, { quoted: msg });
 
             } catch (err) {
                 console.error('[SETFULLDP ERROR]:', err.message);
+                sock.sendMessage(chatJid, { react: { text: '❌', key: msg.key } }).catch(() => {});
                 return sock.sendMessage(chatJid, { text: `❌ Failed to set Full DP: ${err.message}` }, { quoted: msg });
             }
         }
@@ -163,8 +194,7 @@ module.exports = {
                 const groupMeta = await sock.groupMetadata(chatJid).catch(() => null);
                 if (!groupMeta) throw new Error('Could not fetch group metadata.');
 
-                const botCleanNum = botJid.split('@')[0];
-                const botParticipant = groupMeta.participants.find(p => p.id.includes(botCleanNum));
+                const botParticipant = groupMeta.participants.find(p => p.id.includes(cleanBotNumber));
                 const isBotAdmin = botParticipant && (botParticipant.admin === 'admin' || botParticipant.admin === 'superadmin');
 
                 if (!isBotAdmin) {
@@ -177,22 +207,7 @@ module.exports = {
                 for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
 
                 const fullBuffer = await generateFullDpBuffer(buffer);
-
-                await sock.query({
-                    tag: 'iq',
-                    attrs: {
-                        to: chatJid,
-                        type: 'set',
-                        xmlns: 'w:profile:picture'
-                    },
-                    content: [
-                        {
-                            tag: 'picture',
-                            attrs: { type: 'image' },
-                            content: fullBuffer
-                        }
-                    ]
-                });
+                await applyProfilePicture(sock, chatJid, fullBuffer);
 
                 buffer = null;
 
@@ -245,22 +260,9 @@ module.exports = {
                 }
 
                 let targetBuffer = await fetchBufferFromUrl(ppUrl);
+                const fullBuffer = await generateFullDpBuffer(targetBuffer);
 
-                await sock.query({
-                    tag: 'iq',
-                    attrs: {
-                        to: botJid,
-                        type: 'set',
-                        xmlns: 'w:profile:picture'
-                    },
-                    content: [
-                        {
-                            tag: 'picture',
-                            attrs: { type: 'image' },
-                            content: targetBuffer
-                        }
-                    ]
-                });
+                await applyProfilePicture(sock, botJid, fullBuffer);
 
                 lastDpChangeTime = Date.now();
                 targetBuffer = null;
@@ -304,7 +306,7 @@ module.exports = {
                 let buffer = Buffer.from([]);
                 for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
 
-                await sock.updateProfilePicture(botJid, buffer);
+                await applyProfilePicture(sock, botJid, buffer);
                 lastDpChangeTime = Date.now();
                 buffer = null;
 
