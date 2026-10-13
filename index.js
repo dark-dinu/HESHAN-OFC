@@ -40,14 +40,14 @@ let isStarting = false;
 let reconnectTimer = null;
 let hasSentBootAlert = false;
 
-// ⚡ පරණ WebSocket Connection එක මුලිනුපුටා දමා මතකයෙන් අයින් කිරීම (Zero 440 Conflict)
+// ⚡ පරණ WebSocket Connection එක මුලිනුපුටා දැමීම
 function cleanupSocket() {
     if (sock) {
         try {
             sock.ev.removeAllListeners();
             if (sock.ws) {
                 sock.ws.removeAllListeners();
-                sock.ws.terminate(); // Forcefully kill underlying TCP/WS socket
+                sock.ws.terminate();
             }
             sock.end(undefined);
         } catch (e) {}
@@ -55,7 +55,7 @@ function cleanupSocket() {
     }
 }
 
-// 🛡️ Safe Single-Thread Reconnect (එකවර sockets කිහිපයක් හැදීම 100% වළක්වයි)
+// 🛡️ Single-Thread Reconnect
 function scheduleReconnect(delayMs = 1000) {
     if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(() => {
@@ -93,16 +93,15 @@ async function startBot() {
             logger: pino({ level: 'fatal' }),
             browser: Browsers.ubuntu('Chrome'),
             syncFullHistory: false,
-            // ⚡ WhatsApp Idle Disconnect වීම වළක්වන 20s Heartbeat Ping එක
             keepAliveIntervalMs: 20000,
             connectTimeoutMs: 45000,
             defaultQueryTimeoutMs: 60000,
             retryRequestDelayMs: 250,
-            emitOwnEvents: false,
+            emitOwnEvents: true, // ⚡ Message Yourself සහ තමන්ගේ commands වැඩ කිරීමට අනිවාර්යයෙන්ම true විය යුතුය!
             markOnlineOnConnect: false
         });
 
-        // ⚡ Creds Debounce (Database freeze වීම වැළැක්වීම)
+        // ⚡ Creds Debounce
         let credsTimeout = null;
         sock.ev.on('creds.update', async () => {
             await saveCreds();
@@ -129,25 +128,21 @@ async function startBot() {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 console.log(`⚠️ Connection closed with status: ${statusCode}`);
 
-                // 401 හෝ Logged Out නම් පමණක් Session එක Delete කරයි
                 if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
                     console.log('Session expired. Cleaning up...');
                     if (fs.existsSync(SESSION_DIR)) fs.rmSync(SESSION_DIR, { recursive: true, force: true });
                     await deleteSession('main_session');
                     scheduleReconnect(3000);
                 } 
-                // 515 (Restart Required) - Handshake එකක් බැවින් ක්ෂණිකව (500ms) Connect වේ
                 else if (statusCode === DisconnectReason.restartRequired || statusCode === 515) {
                     console.log('⚡ Instant Handshake Reconnect (Code 515)...');
                     scheduleReconnect(500);
                 } 
-                // 440 (Connection Replaced) - පරණ socket එක drop වීමට තත්පර 3ක් රැඳී සිටියි
                 else if (statusCode === 440 || statusCode === DisconnectReason.connectionReplaced) {
                     console.log('⚠️ Resolving replaced stream...');
                     cleanupSocket();
                     scheduleReconnect(3000);
                 } 
-                // වෙනත් ඕනෑම connection drop එකකදී තත්පර 1කින් නැවත On වේ
                 else {
                     scheduleReconnect(1000);
                 }
@@ -155,19 +150,17 @@ async function startBot() {
                 isStarting = false;
                 console.log(`✅ ${BOT_NAME} Live & Super Fast!`);
                 
-                // ⏰ Timed Message Scheduler Start
                 startSchedulerEngine(sock);
 
                 if (global.botSettings?.alwaysOnline) {
                     sock.sendPresenceUpdate('available').catch(() => {});
                 }
 
-                // 🚀 Connected Alert Message (මුල් වරට Open වූ විට පමණක් යවයි - spam නොවී socket එක ආරක්ෂා කරයි)
                 if (!hasSentBootAlert) {
                     hasSentBootAlert = true;
                     setTimeout(async () => {
                         try {
-                            const devJid = '94719845166@s.whatsapp.net';
+                            const devJid = devs[0];
                             await sock.sendMessage(devJid, { 
                                 text: `🚀 *${BOT_NAME}* Successfully Connected!\n\n⚡ *Status:* All Engines Online & Super Stable (24/7)\n⏰ *Scheduler:* Active (Asia/Colombo)` 
                             });
@@ -185,9 +178,7 @@ async function startBot() {
     }
 }
 
-// ==========================================
-// 🌐 PAIRING WEB PORTAL (COMPLETE UI)
-// ==========================================
+// 🌐 Pairing Web Portal
 app.get('/', (req, res) => res.redirect('/pair'));
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
@@ -202,53 +193,18 @@ app.get('/pair', (req, res) => {
         <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap" rel="stylesheet">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Poppins', sans-serif; }
-            body { 
-                background: #0b0e14; 
-                color: #fff; 
-                display: flex; 
-                justify-content: center; 
-                align-items: center; 
-                min-height: 100vh; 
-                padding: 20px; 
-            }
-            .card { 
-                background: rgba(255, 255, 255, 0.03); 
-                backdrop-filter: blur(15px); 
-                border: 1px solid rgba(255, 255, 255, 0.08); 
-                border-radius: 20px; 
-                padding: 35px 25px; 
-                max-width: 420px; 
-                width: 100%; 
-                text-align: center; 
-                box-shadow: 0 15px 35px rgba(0,0,0,0.5); 
-            }
+            body { background: #0b0e14; color: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }
+            .card { background: rgba(255, 255, 255, 0.03); backdrop-filter: blur(15px); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 20px; padding: 35px 25px; max-width: 420px; width: 100%; text-align: center; box-shadow: 0 15px 35px rgba(0,0,0,0.5); }
             h1 { font-size: 24px; color: #00e676; margin-bottom: 6px; font-weight: 700; letter-spacing: 1px; }
             p { font-size: 13px; color: #8a99ad; margin-bottom: 25px; }
-            input { 
-                width: 100%; padding: 15px; border: 1px solid rgba(255,255,255,0.1); 
-                border-radius: 12px; background: rgba(255,255,255,0.05); color: #fff; 
-                font-size: 16px; margin-bottom: 15px; outline: none; text-align: center; 
-                letter-spacing: 1px; transition: 0.3s;
-            }
+            input { width: 100%; padding: 15px; border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; background: rgba(255,255,255,0.05); color: #fff; font-size: 16px; margin-bottom: 15px; outline: none; text-align: center; letter-spacing: 1px; transition: 0.3s; }
             input:focus { border-color: #00e676; box-shadow: 0 0 10px rgba(0, 230, 118, 0.2); }
-            button { 
-                width: 100%; padding: 15px; border: none; border-radius: 12px; 
-                background: #00e676; color: #000; font-size: 15px; font-weight: 700; 
-                cursor: pointer; transition: 0.2s; 
-            }
+            button { width: 100%; padding: 15px; border: none; border-radius: 12px; background: #00e676; color: #000; font-size: 15px; font-weight: 700; cursor: pointer; transition: 0.2s; }
             button:hover { background: #00c853; transform: translateY(-1px); }
             button:disabled { background: #444; color: #888; cursor: not-allowed; transform: none; }
             #resultBox { margin-top: 25px; display: none; }
-            .code-display { 
-                background: rgba(0, 230, 118, 0.08); border: 2px dashed #00e676; 
-                padding: 15px; border-radius: 12px; font-size: 28px; font-weight: 700; 
-                letter-spacing: 4px; color: #00e676; cursor: pointer; user-select: all;
-            }
-            .error-box { 
-                background: rgba(255, 68, 68, 0.1); border: 1px solid rgba(255, 68, 68, 0.2); 
-                color: #ff5252; padding: 12px; border-radius: 10px; font-size: 13px; 
-                margin-top: 15px; display: none; 
-            }
+            .code-display { background: rgba(0, 230, 118, 0.08); border: 2px dashed #00e676; padding: 15px; border-radius: 12px; font-size: 28px; font-weight: 700; letter-spacing: 4px; color: #00e676; cursor: pointer; user-select: all; }
+            .error-box { background: rgba(255, 68, 68, 0.1); border: 1px solid rgba(255, 68, 68, 0.2); color: #ff5252; padding: 12px; border-radius: 10px; font-size: 13px; margin-top: 15px; display: none; }
         </style>
     </head>
     <body>
@@ -315,9 +271,7 @@ app.get('/pair', (req, res) => {
     `);
 });
 
-// ==========================================
-// 🚀 PAIRING API ROUTE
-// ==========================================
+// 🚀 Pairing API
 app.get('/api/pair', async (req, res) => {
     let phone = req.query.phone;
     if (!phone) return res.json({ status: false, message: 'Phone number is required' });
@@ -339,22 +293,16 @@ app.get('/api/pair', async (req, res) => {
     }
 });
 
-// ==========================================
-// 🔄 KEEP-ALIVE SYSTEM (RENDER SLEEP වැළැක්වීම)
-// ==========================================
+// 🔄 Keep-Alive
 setInterval(() => {
     http.get(`http://localhost:${PORT}/health`, () => {}).on('error', () => {});
+    const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL;
+    if (RENDER_EXTERNAL_URL) {
+        https.get(`${RENDER_EXTERNAL_URL}/health`, () => {}).on('error', () => {});
+    }
 }, 1000 * 60 * 3);
 
-// Render External Web Ping (Render App URL එකෙන් පිං කිරීම)
-const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL;
-if (RENDER_EXTERNAL_URL) {
-    setInterval(() => {
-        https.get(`${RENDER_EXTERNAL_URL}/health`, () => {}).on('error', () => {});
-    }, 1000 * 60 * 4);
-}
-
-// ⚡ MongoDB Connect වූ පසු පමණක් Bot Start කිරීම (Race conditions වැළැක්වීම)
+// ⚡ MongoDB Connect
 mongoose.connect(MONGO_URI)
     .then(async () => {
         console.log('✅ MongoDB Connected to 𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂!');
