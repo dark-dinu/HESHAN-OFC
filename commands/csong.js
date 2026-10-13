@@ -12,10 +12,15 @@ try {
     ffmpegPath = 'ffmpeg';
 }
 
+// 🔑 Chamindu Official Working API Key
 const API_KEY = process.env.CHAMINDU_API_KEY || 'chama_api_ec9848130d1aea209f08fb85e0b4720f';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 const MAX_DURATION_SEC = 15 * 60; // තත්පර 900 ට වැඩි සින්දු skip
+
+// 🛡️ Spam / Loop Guard (එකම මැසේජ් එක නැවත නැවත Run වීම වැළැක්වීම)
+const processedMessages = new Set();
+let isCurrentlyProcessing = false;
 
 // ───────────── Helpers ─────────────
 function parseDuration(text) {
@@ -48,14 +53,13 @@ function runFfmpeg(args) {
     });
 }
 
-// ffmpeg output එකෙන් duration (තත්පර) ගැනීම
 function parseFfmpegDuration(stderr) {
     const m = stderr.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
     if (!m) return 0;
     return Math.round(Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]));
 }
 
-// Audio buffer → WhatsApp voice note (OGG Opus). Fail වුණොත් error throw කරනවා (වැරදි file එකක් යවන්නේ නෑ)
+// Audio buffer → WhatsApp voice note (OGG Opus)
 async function convertToWhatsAppVoice(inputBuffer) {
     const id = Date.now() + '_' + Math.random().toString(36).substring(2, 8);
     const tempInput = path.join(os.tmpdir(), `csong_in_${id}.bin`);
@@ -78,12 +82,10 @@ async function convertToWhatsAppVoice(inputBuffer) {
 
         if (error || !fs.existsSync(tempOutput) || fs.statSync(tempOutput).size < 1000) {
             console.error('[FFMPEG ERROR]:', (stderr || '').slice(-500));
-            throw new Error('FFmpeg convert කිරීම අසාර්ථකයි (ffmpeg install වෙලාද බලන්න: npm i @ffmpeg-installer/ffmpeg)');
+            throw new Error('FFmpeg convert කිරීම අසාර්ථකයි.');
         }
 
         const buffer = fs.readFileSync(tempOutput);
-
-        // Duration ලබා ගැනීම
         const probe = await runFfmpeg(['-i', tempOutput]);
         const seconds = parseFfmpegDuration(probe.stderr);
 
@@ -93,7 +95,6 @@ async function convertToWhatsAppVoice(inputBuffer) {
     }
 }
 
-// Object tree එකේ videoRenderer සොයන recursive function
 function findVideoRenderer(node) {
     if (!node || typeof node !== 'object') return null;
     if (node.videoRenderer && node.videoRenderer.videoId) return node.videoRenderer;
@@ -111,7 +112,6 @@ function extractVideoId(text) {
 
 // ───────────── YouTube Search ─────────────
 async function searchYouTube(query) {
-    // 1. YouTube link එකක් නම්
     const directId = extractVideoId(query);
     if (directId) {
         const url = `https://www.youtube.com/watch?v=${directId}`;
@@ -123,7 +123,6 @@ async function searchYouTube(query) {
         return { videoId: directId, url, title, durationSec: 0, thumbnail: `https://i.ytimg.com/vi/${directId}/hqdefault.jpg` };
     }
 
-    // 2. yt-search package (install කරලා තිබ්බොත් වඩාත් ස්ථාවරයි)
     try {
         const yts = require('yt-search');
         const r = await yts(query);
@@ -137,16 +136,12 @@ async function searchYouTube(query) {
                 thumbnail: `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg`
             };
         }
-    } catch (e) {
-        // package නැත්නම් scraper එකට යනවා
-    }
+    } catch (e) {}
 
-    // 3. Manual scraper
     try {
         const res = await axios.get('https://www.youtube.com/results', {
             params: { search_query: query, hl: 'en' },
             timeout: 15000,
-            maxRedirects: 5,
             headers: {
                 'User-Agent': UA,
                 'Accept-Language': 'en-US,en;q=0.9',
@@ -193,10 +188,7 @@ async function getAudioDownloadUrl(videoUrl) {
             const link = inner.direct_url || inner.download_url || inner.url || inner.link
                 || d.direct_url || d.download_url || d.download_link || d.url;
             if (typeof link === 'string' && /^https?:\/\//i.test(link)) return link;
-            console.log('[EP NO LINK]', ep.split('?')[0], JSON.stringify(d).slice(0, 200));
-        } catch (e) {
-            console.log('[EP FAIL]', ep.split('?')[0], e.response?.status || '', e.message);
-        }
+        } catch (e) {}
     }
     return null;
 }
@@ -218,6 +210,26 @@ module.exports = {
     aliases: ['channelsong', 'cvoice', 'cplay'],
     execute: async (sock, msg, args, isDev, BOT_NAME, cleanSender) => {
         const from = msg.key.remoteJid;
+        const msgId = msg.key.id;
+
+        // 🛡️ 1. Duplicate Run Trap (එකම මැසේජ් ID එක දෙපාරක් Execute වීම වළක්වයි)
+        if (msgId && processedMessages.has(msgId)) return;
+        if (msgId) {
+            processedMessages.add(msgId);
+            if (processedMessages.size > 50) processedMessages.delete(processedMessages.keys().next().value);
+        }
+
+        // 🛡️ 2. Old Message Filter (විනාඩි 2කට වඩා පරණ මැසේජ් Bot Restart වෙද්දී Run වීම නවත්වයි)
+        const msgTimestamp = msg.messageTimestamp;
+        if (msgTimestamp && (Date.now() / 1000 - Number(msgTimestamp)) > 120) {
+            return;
+        }
+
+        // 🛡️ 3. Concurrency Lock (එක සින්දුවක් Process වෙද්දී තව එකක් එක පිට වැටීම වළක්වයි)
+        if (isCurrentlyProcessing) {
+            return sock.sendMessage(from, { text: '⏳ කලින් සින්දුව Channel එකට Post වෙමින් පවතී. කරුණාකර තත්පර කිහිපයක් ඉවසන්න...' }, { quoted: msg });
+        }
+
         const botName = BOT_NAME || 'Bot';
         const fullText = (args || []).join(' ').trim();
         const react = (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } }).catch(() => {});
@@ -251,6 +263,7 @@ module.exports = {
             return sock.sendMessage(from, { text: '❌ වලංගු WhatsApp Channel Link එකක් ලබාදෙන්න!' }, { quoted: msg });
         }
 
+        isCurrentlyProcessing = true;
         react('⏳');
 
         try {
@@ -276,71 +289,4 @@ module.exports = {
 
             if (video.durationSec > MAX_DURATION_SEC) {
                 react('❌');
-                return sock.sendMessage(from, { text: `❌ සින්දුව ඉතා දිගයි (${formatDuration(video.durationSec)}). විනාඩි ${MAX_DURATION_SEC / 60} ට අඩු එකක් තෝරන්න.` }, { quoted: msg });
-            }
-
-            // 3. Download
-            const audioUrl = await getAudioDownloadUrl(video.url);
-            if (!audioUrl) throw new Error('Audio Download link එක ලබාගැනීමට නොහැකි විය (API key / API එක පරීක්ෂා කරන්න).');
-
-            const rawBuffer = await downloadBuffer(audioUrl, 90000);
-            if (rawBuffer.length < 5000) throw new Error('Download වුණ audio file එක නිවැරදි නැහැ.');
-
-            // 4. Convert (card එක යවන්න කලින්, fail වුණොත් card එකක් විතරක් post වෙන්නේ නෑ)
-            const voice = await convertToWhatsAppVoice(rawBuffer);
-            const seconds = voice.seconds || video.durationSec || 0;
-            const durationText = formatDuration(seconds);
-
-            // 5. Thumbnail buffer
-            let thumbBuffer = null;
-            for (const q of ['hqdefault', 'mqdefault', 'default']) {
-                try {
-                    thumbBuffer = await downloadBuffer(`https://i.ytimg.com/vi/${video.videoId}/${q}.jpg`, 15000);
-                    if (thumbBuffer.length > 1000) break;
-                    thumbBuffer = null;
-                } catch (e) {
-                    thumbBuffer = null;
-                }
-            }
-
-            const cardCaption =
-`🥰⃝🎶 *“ ${video.title} ”*
-
-0:00 ◁◁  II  ▷▷ ${durationText}
-
-Use Headphones For Best Experience.... 🧚‍♀️🎵
-
-| ☘️ *${botName}*`;
-
-            // 6. Card → Channel
-            if (thumbBuffer) {
-                await sock.sendMessage(channelJid, { image: thumbBuffer, caption: cardCaption });
-            } else {
-                await sock.sendMessage(channelJid, { text: cardCaption });
-            }
-
-            // 7. Voice note → Channel
-            await sock.sendMessage(channelJid, {
-                audio: voice.buffer,
-                mimetype: 'audio/ogg; codecs=opus',
-                ptt: true,
-                seconds: seconds || undefined
-            });
-
-            react('✅');
-            return sock.sendMessage(from, {
-                text: `✅ *"${video.title}"*\nChannel එකට Voice Note එකක් ලෙස සාර්ථකව Post කරන ලදී! 🎙️🔥`
-            }, { quoted: msg });
-
-        } catch (err) {
-            console.error('[CSONG ERROR]:', err);
-            react('❌');
-
-            let reason = err.message || 'Failed to post voice note to channel';
-            if (/forbidden|not-authorized|401|403/i.test(reason)) {
-                reason = 'Channel එකට post කිරීමට අවසර නැහැ. Bot ගේ number එක channel එකේ Owner/Admin විය යුතුයි.';
-            }
-            return sock.sendMessage(from, { text: `❌ Error: ${reason}` }, { quoted: msg });
-        }
-    }
-};
+                return sock.sendMessage(from, { text: `❌ සින්දුව ඉතා දිගයි (${formatDuration(video.durationSec)}). විනාඩි ${MAX_DURATION_SEC / 60} ට අඩු එකක් තෝරන්න.` }, {
