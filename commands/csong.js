@@ -6,6 +6,7 @@ const API_BASE_MP3 = 'https://api.chamindu.site/api/v1/media/ytmp3/dl';
 const API_BASE_MP4 = 'https://api.chamindu.site/api/v1/media/ytmp4/dl';
 const API_KEY = 'chama_api_ec9848130d1aea209f08fb85e0b4720f';
 
+// Native JSON Fetcher
 function fetchJson(url) {
     return new Promise((resolve, reject) => {
         const client = url.startsWith('https') ? https : http;
@@ -16,7 +17,7 @@ function fetchJson(url) {
                 try {
                     resolve(JSON.parse(data));
                 } catch (e) {
-                    reject(new Error('Invalid JSON received from API'));
+                    reject(new Error('Invalid JSON response'));
                 }
             });
             res.on('error', err => reject(err));
@@ -24,113 +25,163 @@ function fetchJson(url) {
     });
 }
 
+// YouTube Fast Search
 function searchYouTube(query) {
     return new Promise((resolve) => {
-        const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
-        const req = https.get(url, {
+        const isUrl = /(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com|youtu\.be)/i.test(query);
+        const searchUrl = isUrl ? query : `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+
+        https.get(searchUrl, {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             }
         }, (res) => {
-            let data = '';
-            res.on('data', chunk => data += chunk);
+            let html = '';
+            res.on('data', chunk => html += chunk);
             res.on('end', () => {
-                const match = data.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
-                if (match) {
-                    resolve(`https://www.youtube.com/watch?v=${match[1]}`);
-                } else {
+                try {
+                    const jsonMatch = html.match(/ytInitialData\s*=\s*({.+?});<\/script>/);
+                    if (!jsonMatch) return resolve(null);
+
+                    const data = JSON.parse(jsonMatch[1]);
+                    const contents = data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents[0]?.itemSectionRenderer?.contents;
+                    if (!contents) return resolve(null);
+
+                    for (const item of contents) {
+                        const vr = item.videoRenderer;
+                        if (vr && vr.videoId) {
+                            return resolve({
+                                videoId: vr.videoId,
+                                url: `https://www.youtube.com/watch?v=${vr.videoId}`,
+                                title: vr.title?.runs?.[0]?.text || 'Channel Song',
+                                author: vr.ownerText?.runs?.[0]?.text || 'Artist',
+                                thumbnail: `https://i.ytimg.com/vi/${vr.videoId}/hqdefault.jpg`
+                            });
+                        }
+                    }
+                    resolve(null);
+                } catch {
                     resolve(null);
                 }
             });
-        });
-        req.on('error', () => resolve(null));
-        req.setTimeout(6000, () => { req.destroy(); resolve(null); });
+        }).on('error', () => resolve(null));
     });
 }
 
-function extractYouTubeUrl(text) {
-    const match = text.match(/(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/i);
-    return match ? match[0] : null;
+// Clean Title Helper
+function cleanTitle(raw) {
+    if (!raw) return 'Song';
+    return raw
+        .replace(/#\S+/g, '')
+        .replace(/[\(\[](?:Official|Music Video|Video|Audio|Lyrics|4K|HD|Remastered)[\)\]]/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim();
 }
 
 module.exports = {
     name: 'csong',
     aliases: ['channelsong', 'cvoice'],
     execute: async (sock, msg, args, isDev, BOT_NAME, cleanSender) => {
-        const chatJid = msg.key.remoteJid;
+        const currentChat = msg.key.remoteJid;
+        const rawInput = args.join(' ').trim();
 
-        const contextInfo = msg.message?.extendedTextMessage?.contextInfo;
-        const quotedText = contextInfo?.quotedMessage?.conversation || 
-                           contextInfo?.quotedMessage?.extendedTextMessage?.text || '';
-
-        const fullInput = (args.join(' ') + ' ' + quotedText).trim();
-
-        if (!fullInput) {
-            return sock.sendMessage(chatJid, { 
-                text: `⚠️ *Please provide a song name or YouTube link to post into channel!*\n\n*Usage:* .csong <song name or link>\n*Example:* .csong Shape of you` 
+        if (!rawInput) {
+            return sock.sendMessage(currentChat, {
+                text: `📻 *Channel Song Poster*\n\n*Usage:*\n• \`.csong <channel_link>, <song_name>\`\n• \`.csong <song_name>\` _(if used inside channel)_\n\n*Example:*\n\`.csong https://whatsapp.com/channel/0029Va..., adariye cozzy\``
             }, { quoted: msg });
         }
 
-        // Reaction දැමීම (🎙️ Voice Note / Channel)
-        sock.sendMessage(chatJid, { react: { text: '🎙️', key: msg.key } }).catch(() => {});
+        // Reaction දැමීම
+        sock.sendMessage(currentChat, { react: { text: '🎙️', key: msg.key } }).catch(() => {});
+
+        let targetJid = currentChat;
+        let songQuery = rawInput;
+
+        // Channel Link එකක් තිබේදැයි පරීක්ෂා කිරීම
+        const channelLinkMatch = rawInput.match(/https?:\/\/(?:www\.)?whatsapp\.com\/channel\/([a-zA-Z0-9_-]+)/i);
+
+        if (channelLinkMatch) {
+            const inviteCode = channelLinkMatch[1];
+            try {
+                // Newsletter (Channel) Metadata Resolve කිරීම
+                const metadata = await sock.newsletterMetadata('invite', inviteCode);
+                if (metadata && metadata.id) {
+                    targetJid = metadata.id; // e.g. 120363xxx@newsletter
+                }
+            } catch (err) {
+                console.error('[CSONG] Channel resolution failed:', err.message);
+                sock.sendMessage(currentChat, { react: { text: '❌', key: msg.key } }).catch(() => {});
+                return sock.sendMessage(currentChat, { 
+                    text: `❌ *Invalid Channel Link or Bot has no permission to access this channel!*` 
+                }, { quoted: msg });
+            }
+
+            // Link එක ඉවත් කර සින්දුවේ නම පමණක් ලබාගැනීම
+            songQuery = rawInput
+                .replace(channelLinkMatch[0], '')
+                .replace(/^[\s,]+|[\s,]+$/g, '')
+                .trim();
+        }
+
+        if (!songQuery) {
+            return sock.sendMessage(currentChat, { 
+                text: `⚠️ *Please provide a song name after the channel link!*\n\n_Example: .csong https://whatsapp.com/channel/xxx, adariye cozzy_` 
+            }, { quoted: msg });
+        }
 
         try {
-            let ytUrl = extractYouTubeUrl(fullInput);
-            if (!ytUrl) {
-                ytUrl = await searchYouTube(fullInput);
-                if (!ytUrl) throw new Error('No search results found on YouTube.');
-            }
+            // YouTube Search
+            const meta = await searchYouTube(songQuery);
+            if (!meta) throw new Error('Song not found on YouTube');
 
-            // Chamindu API
-            let res = await fetchJson(`${API_BASE_MP3}?url=${encodeURIComponent(ytUrl)}&quality=128&api_key=${API_KEY}`).catch(() => null);
-
+            // Chamindu API Endpoint
+            let res = await fetchJson(`${API_BASE_MP3}?url=${encodeURIComponent(meta.url)}&quality=128&api_key=${API_KEY}`).catch(() => null);
             if (!res || !res.status || (!res.data?.download_link && !res.data?.direct_url && !res.download_link)) {
-                res = await fetchJson(`${API_BASE_MP4}?url=${encodeURIComponent(ytUrl)}&quality=360&api_key=${API_KEY}`);
+                res = await fetchJson(`${API_BASE_MP4}?url=${encodeURIComponent(meta.url)}&quality=360&api_key=${API_KEY}`).catch(() => null);
             }
 
-            if (!res || (!res.data && !res.download_link)) {
-                throw new Error(res?.message || 'Failed to generate download link from API.');
-            }
+            const info = res?.data || res;
+            const downloadUrl = info?.download_link || info?.direct_url;
+            if (!downloadUrl) throw new Error('Download stream link unavailable');
 
-            const info = res.data || res;
-            const title = info.title || 'Channel Song';
-            const channel = info.channel || 'Official Artist';
-            const downloadUrl = info.download_link || info.direct_url;
-            const thumbnail = info.thumbnail || 'https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg';
-            const engine = info.engine || 'SaveTube High Speed 10Gbps CDN';
+            const cTitle = cleanTitle(meta.title);
 
-            if (!downloadUrl) throw new Error('Audio download link is missing.');
+            // 🎶 Channel එකට ගැළපෙන Mini Aesthetic Card එක
+            const miniChannelCard = 
+`🎶⃝📻 ━━━━━━━━━━━━━━━━━ ⌑
+┃ ✦ *${cTitle}*
+┃ 👤 *Artist:* ${meta.author}
+┃ 🎧 *Channel Exclusive Track*
+┗━━━━━━━━━━━━━━━━━ ⌑
+> *© ${BOT_NAME}*`;
 
-            // 📻 Channel Aesthetic Poster Card
-            const channelCard = 
-`🎶⃝📻┅┅┅┅┅┅┅┅┅┅┅┅┅▣
-┃ 𝐂𝐇𝐀𝐍𝐍𝐄𝐋 𝐒𝐎𝐍𝐆 𝐏𝐎𝐒𝐓𝐄𝐑 🎙️
-> *📌 ᴛɪᴛʟᴇ:* ${title}
-> *👤 ᴀʀᴛɪꜱᴛ:* ${channel}
-> *🎙️ ᴛʏᴘᴇ:* Original Voice Note (PTT)
-> *⚡ ᴇɴɢɪɴᴇ:* ${engine}
-> *❬  ${BOT_NAME} 𝐂𝐇𝐀𝐍𝐍𝐄𝐋  ❭*`;
+            // 1. Thumbnail Image එක Mini Caption එක සමඟ Channel එකට යැවීම
+            await sock.sendMessage(targetJid, {
+                image: { url: meta.thumbnail },
+                caption: miniChannelCard
+            });
 
-            // Thumbnail Image Card එක යැවීම
-            await sock.sendMessage(chatJid, {
-                image: { url: thumbnail },
-                caption: channelCard
-            }, { quoted: msg });
-
-            // 🎙️ True WhatsApp PTT Voice Note (Channel Compatible with Waveform)
-            await sock.sendMessage(chatJid, {
+            // 2. 🎙️ Original WhatsApp Microphone Waveform සහිත Voice Note එක
+            await sock.sendMessage(targetJid, {
                 audio: { url: downloadUrl },
                 mimetype: 'audio/mp4',
                 ptt: true,
-                waveform: Buffer.from([0, 20, 40, 70, 90, 100, 85, 60, 40, 20, 0, 25, 55, 80, 95, 85, 60, 30, 0, 15, 35, 65, 95, 100, 80, 50, 20, 0])
-            }, { quoted: msg });
+                waveform: Buffer.from([0, 18, 38, 65, 88, 100, 82, 58, 35, 18, 0, 22, 50, 78, 98, 88, 58, 28, 0, 15, 38, 70, 95, 100, 82, 48, 18, 0])
+            });
 
-            sock.sendMessage(chatJid, { react: { text: '✅', key: msg.key } }).catch(() => {});
+            // තමන් command එක ගැසූ chat එකට සාර්ථක වූ බවට reaction එක සහ confirm message එක
+            sock.sendMessage(currentChat, { react: { text: '✅', key: msg.key } }).catch(() => {});
+            
+            if (targetJid !== currentChat) {
+                await sock.sendMessage(currentChat, { 
+                    text: `✅ *Track successfully posted to the Channel!* 📻\n\n📌 *Title:* ${cTitle}` 
+                }, { quoted: msg });
+            }
 
         } catch (err) {
             console.error('[CSONG ERROR]:', err.message);
-            sock.sendMessage(chatJid, { react: { text: '❌', key: msg.key } }).catch(() => {});
-            return sock.sendMessage(chatJid, { text: `❌ *Channel song failed:* ${err.message}` }, { quoted: msg });
+            sock.sendMessage(currentChat, { react: { text: '❌', key: msg.key } }).catch(() => {});
+            return sock.sendMessage(currentChat, { text: `❌ *Error:* ${err.message}` }, { quoted: msg });
         }
     }
 };
