@@ -4,12 +4,16 @@ const http = require('http');
 // Chamindu API Credentials
 const API_BASE = 'https://api.chamindu.site/api/v1/tiktok';
 const API_KEY = 'chama_api_ec9848130d1aea209f08fb85e0b4720f';
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-// Ultra-fast Native JSON Fetcher (Zero external dependencies)
+// Redirects හසුරුවන Native JSON Fetcher
 function fetchJson(url) {
     return new Promise((resolve, reject) => {
         const client = url.startsWith('https') ? https : http;
-        client.get(url, (res) => {
+        const req = client.get(url, { headers: { 'User-Agent': UA } }, (res) => {
+            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                return fetchJson(res.headers.location).then(resolve).catch(reject);
+            }
             let data = '';
             res.on('data', chunk => data += chunk);
             res.on('end', () => {
@@ -20,7 +24,9 @@ function fetchJson(url) {
                 }
             });
             res.on('error', err => reject(err));
-        }).on('error', err => reject(err));
+        });
+        req.on('error', err => reject(err));
+        req.setTimeout(30000, () => { req.destroy(); reject(new Error('API request timeout')); });
     });
 }
 
@@ -49,7 +55,7 @@ module.exports = {
         const quotedText = contextInfo?.quotedMessage?.conversation || 
                            contextInfo?.quotedMessage?.extendedTextMessage?.text || '';
 
-        const fullInput = args.join(' ') + ' ' + quotedText;
+        const fullInput = (args || []).join(' ') + ' ' + quotedText;
         const tiktokUrl = extractTikTokUrl(fullInput);
 
         if (!tiktokUrl) {
@@ -60,7 +66,6 @@ module.exports = {
 
         const isAudioOnly = args[0]?.toLowerCase() === 'mp3' || args[0]?.toLowerCase() === 'audio';
 
-        // 🎥 React as requested
         sock.sendMessage(chatJid, { react: { text: '🎥', key: msg.key } }).catch(() => {});
 
         try {
@@ -96,7 +101,16 @@ module.exports = {
                 return;
             }
 
-            // 🎬 2. Video Direct Download (No-watermark HD Preferred)
+            // 📸 2. Photo Slide post එකක් නම් images ලෙස යැවීම
+            if (item.images && Array.isArray(item.images) && item.images.length > 0) {
+                for (const imgUrl of item.images.slice(0, 5)) {
+                    await sock.sendMessage(chatJid, { image: { url: imgUrl } });
+                }
+                sock.sendMessage(chatJid, { react: { text: '✅', key: msg.key } }).catch(() => {});
+                return;
+            }
+
+            // 🎬 3. Video Direct Download
             const videoUrl = item.downloads?.no_watermark_hd || 
                              item.downloads?.no_watermark || 
                              item.downloads?.no_watermark_sd || 
@@ -106,16 +120,17 @@ module.exports = {
                 throw new Error('Video download URL not found in API response.');
             }
 
-            // 🎶⃝💞 Caption Card Template
             const captionCard = 
 `🎶⃝💞┅┅┅┅┅┅┅┅┅┅┅┅┅▣
 ┃ ᴛɪᴋᴛᴏᴋ ᴅᴏᴡɴʟᴏᴀᴅ
+
 > *📌 ᴛɪᴛʟᴇ:* ${title}
 > *👤 ᴜꜱᴇʀ:* ${authorName} (${authorUser})
 > *⏱️ ᴛɪᴍᴇ:* ${duration}s
 > *👁️ ᴠɪᴇᴡꜱ:* ${views} | *❤️ ʟɪᴋᴇꜱ:* ${likes}
 > *💬 ᴄᴏᴍᴍᴇɴᴛꜱ:* ${comments} | *🔁 ꜱʜᴀʀᴇꜱ:* ${shares}
-> *❬  ${BOT_NAME}  ❭*`;
+
+> *❬  ❄️ ${BOT_NAME}  ❭*`;
 
             await sock.sendMessage(chatJid, {
                 video: { url: videoUrl },
