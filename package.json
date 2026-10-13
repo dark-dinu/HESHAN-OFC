@@ -10,7 +10,7 @@
     "@whiskeysockets/baileys": "latest",
     "express": "^4.18.2",
     "fs-extra": "^11.1.0",
-    "jimp": "^0.22.12",
+    "jimp": "^1.6.1",
     "mongoose": "^8.0.0",
     "pino": "^8.0.0"
   }
