@@ -110,7 +110,7 @@ module.exports = {
             }, { quoted: msg });
         }
 
-        sock.sendMessage(chatJid, { react: { text: '🔍', key: msg.key } }).catch(() => {});
+        sock.sendMessage(chatJid, { react: { text: '🎵', key: msg.key } }).catch(() => {});
 
         try {
             const meta = await scrapeYouTubeMeta(query);
@@ -169,7 +169,7 @@ module.exports = {
 
         if (!['1', '2', '3'].includes(choice)) return false;
 
-        sock.sendMessage(chatJid, { react: { text: '⏳', key: msg.key } }).catch(() => {});
+        sock.sendMessage(chatJid, { react: { text: '⬇️', key: msg.key } }).catch(() => {});
 
         try {
             const downloadUrl = await getAudioDownloadUrl(session.ytUrl);
@@ -205,7 +205,7 @@ module.exports = {
                 }, { quoted: msg });
             }
 
-            sock.sendMessage(chatJid, { react: { text: '✅', key: msg.key } }).catch(() => {});
+            sock.sendMessage(chatJid, { react: { text: '🥰', key: msg.key } }).catch(() => {});
             return true;
 
         } catch (err) {
