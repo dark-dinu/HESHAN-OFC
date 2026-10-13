@@ -17,7 +17,7 @@ const path = require('path');
 
 const { loadSettings } = require('./models/settings');
 const { startSchedulerEngine } = require('./models/schedule');
-const { registerAllHandlers } = require('./handlers');
+const { registerAllHandlers, messageStore } = require('./handlers');
 const { saveSession, getSession, deleteSession } = require('./auth');
 
 const app = express();
@@ -40,7 +40,6 @@ let isStarting = false;
 let reconnectTimer = null;
 let hasSentBootAlert = false;
 
-// ⚡ පරණ WebSocket Connection එක මුලිනුපුටා දැමීම
 function cleanupSocket() {
     if (sock) {
         try {
@@ -55,7 +54,6 @@ function cleanupSocket() {
     }
 }
 
-// 🛡️ Single-Thread Reconnect
 function scheduleReconnect(delayMs = 1000) {
     if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(() => {
@@ -78,7 +76,7 @@ async function startBot() {
             const savedCreds = await getSession('main_session');
             if (savedCreds) {
                 fs.writeFileSync(credsPath, JSON.stringify(savedCreds, BufferJSON.replacer, 2));
-                console.log('🔑 Credentials loaded from MongoDB.');
+                console.log('🔑 Credentials loaded from Database.');
             }
         }
 
@@ -93,15 +91,23 @@ async function startBot() {
             logger: pino({ level: 'fatal' }),
             browser: Browsers.ubuntu('Chrome'),
             syncFullHistory: false,
+            // ⚡ "Waiting for this message" දෝෂය සම්පූර්ණයෙන්ම වළක්වන getMessage resolver
+            getMessage: async (key) => {
+                if (messageStore && key?.id) {
+                    const cached = messageStore.get(key.id);
+                    if (cached?.message) return cached.message;
+                }
+                return undefined;
+            },
             keepAliveIntervalMs: 20000,
             connectTimeoutMs: 45000,
             defaultQueryTimeoutMs: 60000,
             retryRequestDelayMs: 250,
-            emitOwnEvents: true, // ⚡ Message Yourself සහ තමන්ගේ commands වැඩ කිරීමට අනිවාර්යයෙන්ම true විය යුතුය!
+            emitOwnEvents: true, // Message yourself වැඩ කිරීමට
             markOnlineOnConnect: false
         });
 
-        // ⚡ Creds Debounce
+        // Creds Auto Sync
         let credsTimeout = null;
         sock.ev.on('creds.update', async () => {
             await saveCreds();
@@ -109,8 +115,12 @@ async function startBot() {
                 credsTimeout = setTimeout(async () => {
                     try {
                         if (fs.existsSync(credsPath)) {
-                            const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'), BufferJSON.reviver);
-                            await saveSession('main_session', creds);
+                            fs.readFile(credsPath, 'utf-8', async (err, data) => {
+                                if (!err && data) {
+                                    const parsed = JSON.parse(data, BufferJSON.reviver);
+                                    await saveSession('main_session', parsed);
+                                }
+                            });
                         }
                     } catch (e) {}
                     credsTimeout = null;
@@ -118,38 +128,29 @@ async function startBot() {
             }
         });
 
-        // 🚀 Handlers Run කිරීම
         registerAllHandlers(sock, devs, devNumbers, BOT_NAME);
 
-        // Connection Lifecycle
         sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
             if (connection === 'close') {
                 isStarting = false;
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
-                console.log(`⚠️ Connection closed with status: ${statusCode}`);
+                console.log(`⚠️ Connection closed: ${statusCode}`);
 
                 if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-                    console.log('Session expired. Cleaning up...');
                     if (fs.existsSync(SESSION_DIR)) fs.rmSync(SESSION_DIR, { recursive: true, force: true });
                     await deleteSession('main_session');
                     scheduleReconnect(3000);
-                } 
-                else if (statusCode === DisconnectReason.restartRequired || statusCode === 515) {
-                    console.log('⚡ Instant Handshake Reconnect (Code 515)...');
+                } else if (statusCode === DisconnectReason.restartRequired || statusCode === 515) {
                     scheduleReconnect(500);
-                } 
-                else if (statusCode === 440 || statusCode === DisconnectReason.connectionReplaced) {
-                    console.log('⚠️ Resolving replaced stream...');
+                } else if (statusCode === 440 || statusCode === DisconnectReason.connectionReplaced) {
                     cleanupSocket();
                     scheduleReconnect(3000);
-                } 
-                else {
+                } else {
                     scheduleReconnect(1000);
                 }
             } else if (connection === 'open') {
                 isStarting = false;
                 console.log(`✅ ${BOT_NAME} Live & Super Fast!`);
-                
                 startSchedulerEngine(sock);
 
                 if (global.botSettings?.alwaysOnline) {
@@ -164,7 +165,6 @@ async function startBot() {
                             await sock.sendMessage(devJid, { 
                                 text: `🚀 *${BOT_NAME}* Successfully Connected!\n\n⚡ *Status:* All Engines Online & Super Stable (24/7)\n⏰ *Scheduler:* Active (Asia/Colombo)` 
                             });
-                            console.log('📬 Connected message sent to developer!');
                         } catch (err) {}
                     }, 2000);
                 }
@@ -173,12 +173,11 @@ async function startBot() {
 
     } catch (err) {
         isStarting = false;
-        console.error('Fatal start error:', err.message);
         scheduleReconnect(3000);
     }
 }
 
-// 🌐 Pairing Web Portal
+// Pairing Portal
 app.get('/', (req, res) => res.redirect('/pair'));
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
@@ -195,13 +194,13 @@ app.get('/pair', (req, res) => {
             * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Poppins', sans-serif; }
             body { background: #0b0e14; color: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }
             .card { background: rgba(255, 255, 255, 0.03); backdrop-filter: blur(15px); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 20px; padding: 35px 25px; max-width: 420px; width: 100%; text-align: center; box-shadow: 0 15px 35px rgba(0,0,0,0.5); }
-            h1 { font-size: 24px; color: #00e676; margin-bottom: 6px; font-weight: 700; letter-spacing: 1px; }
+            h1 { font-size: 24px; color: #00e676; margin-bottom: 6px; font-weight: 700; }
             p { font-size: 13px; color: #8a99ad; margin-bottom: 25px; }
-            input { width: 100%; padding: 15px; border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; background: rgba(255,255,255,0.05); color: #fff; font-size: 16px; margin-bottom: 15px; outline: none; text-align: center; letter-spacing: 1px; transition: 0.3s; }
+            input { width: 100%; padding: 15px; border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; background: rgba(255,255,255,0.05); color: #fff; font-size: 16px; margin-bottom: 15px; outline: none; text-align: center; }
             input:focus { border-color: #00e676; box-shadow: 0 0 10px rgba(0, 230, 118, 0.2); }
             button { width: 100%; padding: 15px; border: none; border-radius: 12px; background: #00e676; color: #000; font-size: 15px; font-weight: 700; cursor: pointer; transition: 0.2s; }
             button:hover { background: #00c853; transform: translateY(-1px); }
-            button:disabled { background: #444; color: #888; cursor: not-allowed; transform: none; }
+            button:disabled { background: #444; color: #888; cursor: not-allowed; }
             #resultBox { margin-top: 25px; display: none; }
             .code-display { background: rgba(0, 230, 118, 0.08); border: 2px dashed #00e676; padding: 15px; border-radius: 12px; font-size: 28px; font-weight: 700; letter-spacing: 4px; color: #00e676; cursor: pointer; user-select: all; }
             .error-box { background: rgba(255, 68, 68, 0.1); border: 1px solid rgba(255, 68, 68, 0.2); color: #ff5252; padding: 12px; border-radius: 10px; font-size: 13px; margin-top: 15px; display: none; }
@@ -271,11 +270,9 @@ app.get('/pair', (req, res) => {
     `);
 });
 
-// 🚀 Pairing API
 app.get('/api/pair', async (req, res) => {
     let phone = req.query.phone;
     if (!phone) return res.json({ status: false, message: 'Phone number is required' });
-
     phone = phone.replace(/[^0-9]/g, '');
 
     try {
@@ -293,7 +290,6 @@ app.get('/api/pair', async (req, res) => {
     }
 });
 
-// 🔄 Keep-Alive
 setInterval(() => {
     http.get(`http://localhost:${PORT}/health`, () => {}).on('error', () => {});
     const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL;
@@ -302,7 +298,6 @@ setInterval(() => {
     }
 }, 1000 * 60 * 3);
 
-// ⚡ MongoDB Connect
 mongoose.connect(MONGO_URI)
     .then(async () => {
         console.log('✅ MongoDB Connected to 𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂!');
