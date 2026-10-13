@@ -25,7 +25,7 @@ function fetchJson(url) {
     });
 }
 
-// YouTube Fast Search
+// YouTube Search Scraper
 function searchYouTube(query) {
     return new Promise((resolve) => {
         const isUrl = /(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com|youtu\.be)/i.test(query);
@@ -68,7 +68,6 @@ function searchYouTube(query) {
     });
 }
 
-// Clean Title Helper
 function cleanTitle(raw) {
     if (!raw) return 'Song';
     return raw
@@ -76,6 +75,12 @@ function cleanTitle(raw) {
         .replace(/[\(\[](?:Official|Music Video|Video|Audio|Lyrics|4K|HD|Remastered)[\)\]]/gi, '')
         .replace(/\s+/g, ' ')
         .trim();
+}
+
+// WhatsApp Channel Invite Code එක Link එකෙන් වෙන් කර ගැනීම
+function extractChannelInviteCode(url) {
+    const match = url.match(/whatsapp\.com\/channel\/([a-zA-Z0-9_-]{10,})/i);
+    return match ? match[1] : null;
 }
 
 module.exports = {
@@ -87,45 +92,62 @@ module.exports = {
 
         if (!rawInput) {
             return sock.sendMessage(currentChat, {
-                text: `📻 *Channel Song Poster*\n\n*Usage:*\n• \`.csong <channel_link>, <song_name>\`\n• \`.csong <song_name>\` _(if used inside channel)_\n\n*Example:*\n\`.csong https://whatsapp.com/channel/0029Va..., adariye cozzy\``
+                text: `📻 *Channel Song Poster*\n\n*Usage:*\n.csong <channel_link>, <song_name>\n\n*Example:*\n.csong https://whatsapp.com/channel/0029VaXXXXX, adariye cozzy`
             }, { quoted: msg });
         }
 
-        // Reaction දැමීම
-        sock.sendMessage(currentChat, { react: { text: '🎙️', key: msg.key } }).catch(() => {});
+        sock.sendMessage(currentChat, { react: { text: '⏳', key: msg.key } }).catch(() => {});
 
-        let targetJid = currentChat;
+        let targetJid = null;
         let songQuery = rawInput;
 
-        // Channel Link එකක් තිබේදැයි පරීක්ෂා කිරීම
-        const channelLinkMatch = rawInput.match(/https?:\/\/(?:www\.)?whatsapp\.com\/channel\/([a-zA-Z0-9_-]+)/i);
+        // 1. Channel JID / Link එක හඳුනාගැනීම
+        const inviteCode = extractChannelInviteCode(rawInput);
 
-        if (channelLinkMatch) {
-            const inviteCode = channelLinkMatch[1];
+        if (inviteCode) {
             try {
-                // Newsletter (Channel) Metadata Resolve කිරීම
+                // Newsletter invite code එකෙන් Newsletter Metadata (JID) එක ලබාගැනීම
                 const metadata = await sock.newsletterMetadata('invite', inviteCode);
                 if (metadata && metadata.id) {
-                    targetJid = metadata.id; // e.g. 120363xxx@newsletter
+                    targetJid = metadata.id; // e.g., 120363xxx@newsletter
+                } else {
+                    throw new Error('Newsletter ID not found in metadata');
                 }
             } catch (err) {
-                console.error('[CSONG] Channel resolution failed:', err.message);
+                console.error('[CSONG RESOLVE ERROR]:', err.message);
                 sock.sendMessage(currentChat, { react: { text: '❌', key: msg.key } }).catch(() => {});
                 return sock.sendMessage(currentChat, { 
-                    text: `❌ *Invalid Channel Link or Bot has no permission to access this channel!*` 
+                    text: `❌ *Failed to find Channel!* කරුණාකර Bot අදාළ Channel එකේ Admin කෙනෙක් බව තහවුරු කරගන්න.\n\n*Error:* ${err.message}` 
                 }, { quoted: msg });
             }
 
-            // Link එක ඉවත් කර සින්දුවේ නම පමණක් ලබාගැනීම
+            // Link එක ඉවත් කර සින්දුවේ නම වෙන් කිරීම
             songQuery = rawInput
-                .replace(channelLinkMatch[0], '')
+                .replace(/https?:\/\/(?:www\.)?whatsapp\.com\/channel\/[a-zA-Z0-9_-]+/i, '')
                 .replace(/^[\s,]+|[\s,]+$/g, '')
                 .trim();
+        } else if (currentChat.endsWith('@newsletter')) {
+            targetJid = currentChat;
+        } else {
+            // Direct newsletter JID එකක් දුන්නොත්
+            const directJidMatch = rawInput.match(/([0-9]+@newsletter)/i);
+            if (directJidMatch) {
+                targetJid = directJidMatch[1];
+                songQuery = rawInput.replace(directJidMatch[0], '').replace(/^[\s,]+|[\s,]+$/g, '').trim();
+            }
+        }
+
+        if (!targetJid) {
+            sock.sendMessage(currentChat, { react: { text: '⚠️', key: msg.key } }).catch(() => {});
+            return sock.sendMessage(currentChat, { 
+                text: `⚠️ *Channel Link එක සොයාගත නොහැකි විය!*\n\nකරුණාකර නිවැරදි Link එකක් ලබාදෙන්න:\n.csong https://whatsapp.com/channel/xxx, <song_name>` 
+            }, { quoted: msg });
         }
 
         if (!songQuery) {
+            sock.sendMessage(currentChat, { react: { text: '⚠️', key: msg.key } }).catch(() => {});
             return sock.sendMessage(currentChat, { 
-                text: `⚠️ *Please provide a song name after the channel link!*\n\n_Example: .csong https://whatsapp.com/channel/xxx, adariye cozzy_` 
+                text: `⚠️ *කරුණාකර සින්දුවේ නම ලබාදෙන්න!*\n\nඋදා: .csong https://whatsapp.com/channel/xxx, adariye cozzy` 
             }, { quoted: msg });
         }
 
@@ -142,11 +164,11 @@ module.exports = {
 
             const info = res?.data || res;
             const downloadUrl = info?.download_link || info?.direct_url;
-            if (!downloadUrl) throw new Error('Download stream link unavailable');
+            if (!downloadUrl) throw new Error('Audio download link is unavailable');
 
             const cTitle = cleanTitle(meta.title);
 
-            // 🎶 Channel එකට ගැළපෙන Mini Aesthetic Card එක
+            // 🎶 Channel එකට ගැළපෙන Mini Aesthetic Poster Card එක
             const miniChannelCard = 
 `🎶⃝📻 ━━━━━━━━━━━━━━━━━ ⌑
 ┃ ✦ *${cTitle}*
@@ -161,27 +183,29 @@ module.exports = {
                 caption: miniChannelCard
             });
 
-            // 2. 🎙️ Original WhatsApp Microphone Waveform සහිත Voice Note එක
+            // 2. Channel Compatible Audio Stream එක යැවීම (No crashing waveform/ptt)
             await sock.sendMessage(targetJid, {
                 audio: { url: downloadUrl },
                 mimetype: 'audio/mp4',
-                ptt: true,
-                waveform: Buffer.from([0, 18, 38, 65, 88, 100, 82, 58, 35, 18, 0, 22, 50, 78, 98, 88, 58, 28, 0, 15, 38, 70, 95, 100, 82, 48, 18, 0])
+                ptt: false,
+                fileName: `${cTitle.slice(0, 30)}.mp3`
             });
 
-            // තමන් command එක ගැසූ chat එකට සාර්ථක වූ බවට reaction එක සහ confirm message එක
+            // Confirm Reaction & Success Message
             sock.sendMessage(currentChat, { react: { text: '✅', key: msg.key } }).catch(() => {});
             
             if (targetJid !== currentChat) {
                 await sock.sendMessage(currentChat, { 
-                    text: `✅ *Track successfully posted to the Channel!* 📻\n\n📌 *Title:* ${cTitle}` 
+                    text: `✅ *Track successfully posted to the Channel!* 📻\n\n📌 *Song:* ${cTitle}\n📍 *Channel ID:* \`${targetJid}\`` 
                 }, { quoted: msg });
             }
 
         } catch (err) {
-            console.error('[CSONG ERROR]:', err.message);
+            console.error('[CSONG EXECUTION ERROR]:', err);
             sock.sendMessage(currentChat, { react: { text: '❌', key: msg.key } }).catch(() => {});
-            return sock.sendMessage(currentChat, { text: `❌ *Error:* ${err.message}` }, { quoted: msg });
+            return sock.sendMessage(currentChat, { 
+                text: `❌ *Channel එකට දැමීම අසාර්ථක විය!*\n\n*Error:* ${err.message}\n\n💡 *මතක තබාගන්න:* Bot ගේ අංකය එම WhatsApp Channel එකේ *Admin* කෙනෙක් ලෙස add කර තිබිය යුතුය!` 
+            }, { quoted: msg });
         }
     }
 };
