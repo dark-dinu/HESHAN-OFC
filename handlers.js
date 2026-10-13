@@ -12,7 +12,6 @@ if (fs.existsSync(commandsDir)) {
             try {
                 const cmd = require(path.join(commandsDir, file));
                 if (cmd.name) commands.set(cmd.name.toLowerCase(), cmd);
-                // Aliases (setdp, getdp ආදිය) RAM Map එකට register කිරීම
                 if (cmd.aliases && Array.isArray(cmd.aliases)) {
                     cmd.aliases.forEach(alias => commands.set(alias.toLowerCase(), cmd));
                 }
@@ -24,13 +23,14 @@ if (fs.existsSync(commandsDir)) {
     console.log(`⚡ [ENGINE] Pre-loaded ${commands.size} commands into RAM!`);
 }
 
-// Memory Stores (RAM Optimized)
+// Memory Stores
 const messageStore = new Map();
 const mediaCacheStore = new Map();
 const viewOnceStore = new Map();
 const statusStore = new Map();
+const processedMessageIds = new Set(); // 🛡️ මැසේජ් 2ක් යෑම 100% වළක්වන Trap
 const MAX_MSG_STORE = 500;
-const MAX_MEDIA_STORE = 30;
+const MAX_MEDIA_STORE = 25;
 
 async function downloadMedia(content, type) {
     try {
@@ -44,7 +44,6 @@ async function downloadMedia(content, type) {
     }
 }
 
-// 🎯 Helper: සියලු WhatsApp Wrappers ඉවත් කර සැබෑ Message Object එක ලබා ගැනීම
 function unwrapMessage(msg) {
     let m = msg;
     if (!m) return null;
@@ -56,7 +55,6 @@ function unwrapMessage(msg) {
     return m;
 }
 
-// 🎯 100% Bulletproof Text Extractor (messageContextInfo දෝෂ සම්පූර්ණයෙන්ම වළක්වයි)
 function extractMessageText(m) {
     if (!m) return '';
     return m.conversation || 
@@ -74,7 +72,6 @@ const statusKeywords = [
     '.save', '.send'
 ];
 
-// Anti View-Once Emoji Unlock List
 const viewOnceEmojis = [
     '🤭', '😁', '❤️', '😭', '😼', '😚', '😘', '👤', '😹', '🥵',
     '💔', '🫡', '👍', '🤣', '😏', '😌', '👎', '🙈', '🙏', '🤝'
@@ -96,9 +93,7 @@ const ANTI_CALL_AUDIO = 'https://files.catbox.moe/osl5lm.ogg';
 
 function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
 
-    // ==============================================================
-    // 📞 1. ANTI-CALL ENGINE
-    // ==============================================================
+    // 📞 1. Anti-Call
     sock.ev.on('call', async (callEvents) => {
         if (!global.botSettings?.antiCall) return;
 
@@ -111,23 +106,17 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
 
                 try {
                     await sock.rejectCall(call.id, call.from);
-                    console.log(`🚫 [ANTI-CALL] Rejected call from: ${cleanCaller}`);
-
                     await sock.sendMessage(callerJid, {
                         audio: { url: ANTI_CALL_AUDIO },
                         mimetype: 'audio/mp4',
                         ptt: true
                     });
-                } catch (err) {
-                    console.error('[ANTI-CALL ERROR]:', err.message);
-                }
+                } catch (err) {}
             }
         }
     });
 
-    // ==============================================================
-    // 🗑️ ANTI-DELETE RECOVERY ENGINE
-    // ==============================================================
+    // 🗑️ Anti-Delete Recovery
     async function recoverDeletedMessage(deletedId) {
         if (!global.botSettings?.antiDelete || !deletedId) return;
 
@@ -173,15 +162,10 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
                     }
                 }
             }
-            console.log(`✅ [ANTI-DELETE] Recovered message sent to: ${sendTarget}`);
-        } catch (err) {
-            console.error('[ANTI-DELETE ERROR]:', err.message);
-        }
+        } catch (err) {}
     }
 
-    // ==============================================================
-    // 👁️‍🗨️ VIEW-ONCE UNLOCK HELPER
-    // ==============================================================
+    // 👁️‍🗨️ View-Once Unlock Helper
     async function sendUnlockedViewOnce(targetMessage, replyJid, quotedMsgKey) {
         const inner = unwrapMessage(targetMessage);
         if (!inner) return false;
@@ -206,9 +190,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         return false;
     }
 
-    // ==============================================================
-    // 🤩 2. REACTION LISTENER
-    // ==============================================================
+    // 🤩 2. Reaction Listener
     sock.ev.on('messages.reaction', async (reactions) => {
         for (const r of reactions) {
             const reactionText = r.reaction?.text;
@@ -220,22 +202,31 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             if (targetId && viewOnceStore.has(targetId)) {
                 const voData = viewOnceStore.get(targetId);
                 await sendUnlockedViewOnce(voData.message, targetJid, voData.msg);
-                console.log(`🔓 [VIEW-ONCE] Unlocked via reaction (${reactionText})`);
             }
         }
     });
 
-    // ==============================================================
-    // 📩 3. MESSAGES UPSERT (Super Fast & Reliable)
-    // ==============================================================
+    // 📩 3. Messages Upsert
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify' && type !== 'append') return;
         const msg = messages[0];
         if (!msg || !msg.message) return;
 
+        const msgId = msg.key?.id;
+
+        // 🛡️ DUPLICATE TRAP: එකම මැසේජ් ID එක දෙපාරක් Run වීම 100% වළක්වයි
+        if (msgId) {
+            if (processedMessageIds.has(msgId)) return;
+            processedMessageIds.add(msgId);
+            if (processedMessageIds.size > 200) {
+                const first = processedMessageIds.values().next().value;
+                processedMessageIds.delete(first);
+            }
+        }
+
         const remoteJid = msg.key.remoteJid || '';
 
-        // Anti Delete Trap (Protocol Revoke)
+        // Protocol Revoke
         const protocolMsg = msg.message.protocolMessage;
         if (protocolMsg && (protocolMsg.type === 0 || protocolMsg.type === 'REVOKE')) {
             const deletedId = protocolMsg.key?.id;
@@ -257,7 +248,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         const rawMsg = unwrapMessage(msg.message);
         if (!rawMsg) return;
 
-        // 📥 Caching (RAM Optimized: Anti-delete ON නම් පමණක් Cache කරයි)
+        // Caching
         if (msg.key?.id) {
             if (messageStore.size >= MAX_MSG_STORE) messageStore.delete(messageStore.keys().next().value);
             messageStore.set(msg.key.id, { key: msg.key, message: rawMsg, pushName: msg.pushName });
@@ -276,7 +267,6 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             }
         }
 
-        // 🛡️ Bulletproof Sender Resolution
         const isMe = Boolean(msg.key.fromMe);
         const botUserNumber = sock.user?.id ? sock.user.id.split(':')[0].split('@')[0].replace(/[^0-9]/g, '') : '';
         const rawSender = isMe 
@@ -327,7 +317,6 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         if (global.botSettings?.mode === 'private' && !isDev) return;
         if (global.botSettings?.mode === 'group' && !remoteJid.endsWith('@g.us') && !isDev) return;
 
-        // ⚡ Extract Text (නොවරදින අකුරු හඳුනාගැනීම)
         let text = extractMessageText(rawMsg).trim();
 
         const contextInfo = rawMsg.extendedTextMessage?.contextInfo || 
@@ -336,7 +325,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         const stanzaId = contextInfo?.stanzaId;
         const isStatusReply = contextInfo?.remoteJid === 'status@broadcast';
 
-        // 🔓 Emoji Reply Unlock
+        // Emoji Unlock
         if (viewOnceEmojis.includes(text) && quotedMsg) {
             let targetVO = quotedMsg;
             if (stanzaId && viewOnceStore.has(stanzaId)) {
@@ -379,7 +368,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             }
         }
 
-        // 🎵 Song Reply Selector (1, 2, 3)
+        // Song Reply Selector
         if (['1', '2', '3', '1️⃣', '2️⃣', '3️⃣'].includes(text) && quotedMsg) {
             const songCmd = commands.get('song');
             if (songCmd && typeof songCmd.handleReply === 'function') {
@@ -397,7 +386,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             }
         }
 
-        // 🚀 Fast Command Execution
+        // Fast Command Execution
         if (!text.startsWith('.')) return;
         const args = text.slice(1).trim().split(/ +/);
         const commandName = args.shift().toLowerCase();
@@ -424,4 +413,4 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
     });
 }
 
-module.exports = { registerAllHandlers };
+module.exports = { registerAllHandlers, messageStore };
