@@ -4,13 +4,13 @@ const scheduleSchema = new mongoose.Schema({
     type: { type: String, enum: ['chat', 'channel'], required: true },
     target: { type: String, required: true },
     message: { type: String, required: true },
-    time: { type: String, required: true }, // e.g. "18:30"
-    lastSentTimestamp: { type: String, default: '' } // "YYYY-MM-DD HH:mm"
+    time: { type: String, required: true, index: true }, // e.g. "18:30" (Fast indexed query)
+    lastSentTimestamp: { type: String, default: '' }     // "YYYY-MM-DD HH:mm"
 }, { timestamps: true });
 
 const Schedule = mongoose.models.Schedule || mongoose.model('Schedule', scheduleSchema);
 
-// ශ්‍රී ලංකා වේලාව (+05:30) සහ දිනය නිවැරදිව ලබාගැනීම
+// ශ්‍රී ලංකා වේලාව (+05:30) සහ දිනය ලබා ගැනීම
 function getSLTimeAndDate() {
     const now = new Date();
     const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
@@ -39,6 +39,7 @@ function normalizeTime(t) {
 }
 
 let schedulerTimer = null;
+const inFlightTasks = new Set(); // Concurrency Lock (දෙවරක් යැවීම 100% වළක්වයි)
 
 function startSchedulerEngine(sock) {
     if (schedulerTimer) clearInterval(schedulerTimer);
@@ -53,15 +54,20 @@ function startSchedulerEngine(sock) {
             const { time: currentTime, date: currentDate } = getSLTimeAndDate();
             const currentSlot = `${currentDate} ${currentTime}`;
 
-            // වේලාව ගැලපෙන සියලු schedules MongoDB එකෙන් ලබාගැනීම
-            const allSchedules = await Schedule.find();
-            const tasks = allSchedules.filter(t => normalizeTime(t.time) === currentTime);
+            // ⚡ Optimized DB Query (සියල්ල load නොකර අදාළ වේලාව සහ තවම නොයැවූ tasks පමණක් DB එකෙන් ගනී)
+            const tasks = await Schedule.find({
+                time: currentTime,
+                lastSentTimestamp: { $ne: currentSlot }
+            }).lean();
+
+            if (!tasks || tasks.length === 0) return;
 
             for (const task of tasks) {
-                // මෙම මිනිත්තුව තුළ දැනටමත් යවා ඇත්නම් මඟහරියි (දෙවරක් යැවීම වැළැක්වීම)
-                if (task.lastSentTimestamp === currentSlot) continue;
+                const taskId = String(task._id);
+                if (inFlightTasks.has(taskId)) continue; // Concurrency protection
+                inFlightTasks.add(taskId);
 
-                console.log(`[TRIGGER] Executing Schedule ID: ${task._id} at ${currentTime}`);
+                console.log(`[TRIGGER] Executing Schedule ID: ${taskId} at ${currentTime}`);
 
                 let sentSuccessfully = false;
 
@@ -71,16 +77,20 @@ function startSchedulerEngine(sock) {
                         let channelJid = task.target.trim();
 
                         if (channelJid.includes('whatsapp.com/channel/')) {
-                            const code = channelJid.split('whatsapp.com/channel/')[1].split('/')[0].trim();
-                            try {
-                                const meta = await sock.newsletterMetadata('invite', code);
-                                if (meta?.id) channelJid = meta.id;
-                            } catch (e) {
-                                console.error('[CHANNEL RESOLVE ERROR]:', e.message);
+                            const code = channelJid.split('whatsapp.com/channel/')[1]?.split(/[\/?#]/)[0]?.trim();
+                            if (code) {
+                                try {
+                                    const meta = await sock.newsletterMetadata('invite', code);
+                                    if (meta?.id) channelJid = meta.id;
+                                } catch (e) {
+                                    console.error('[CHANNEL RESOLVE ERROR]:', e.message);
+                                }
                             }
                         }
 
-                        if (!channelJid.endsWith('@newsletter')) channelJid += '@newsletter';
+                        if (!channelJid.includes('@')) {
+                            channelJid = `${channelJid}@newsletter`;
+                        }
 
                         await sock.sendMessage(channelJid, { text: task.message });
                         sentSuccessfully = true;
@@ -96,7 +106,9 @@ function startSchedulerEngine(sock) {
                         let mentions = [];
                         if (targetJid.endsWith('@g.us') && task.message.includes('@')) {
                             const groupMeta = await sock.groupMetadata(targetJid).catch(() => null);
-                            if (groupMeta) mentions = groupMeta.participants.map(p => p.id);
+                            if (groupMeta?.participants) {
+                                mentions = groupMeta.participants.map(p => p.id);
+                            }
                         }
 
                         await sock.sendMessage(targetJid, { 
@@ -112,6 +124,8 @@ function startSchedulerEngine(sock) {
                     }
                 } catch (err) {
                     console.error(`❌ [SEND FAIL] ${task.target}:`, err.message);
+                } finally {
+                    inFlightTasks.delete(taskId);
                 }
             }
         } catch (err) {
