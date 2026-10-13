@@ -1,10 +1,10 @@
-const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
+const { downloadContentFromMessage, jidNormalizedUser } = require('@whiskeysockets/baileys');
 const https = require('https');
 const http = require('http');
 
-// 🛡️ WhatsApp Anti-Ban Safe Guard (තත්පර 45ක Cooldown ආරක්ෂාව)
+// 🛡️ WhatsApp Anti-Ban Safe Guard (තත්පර 30ක Cooldown ආරක්ෂාව)
 let lastDpChangeTime = 0;
-const DP_COOLDOWN_MS = 45 * 1000;
+const DP_COOLDOWN_MS = 30 * 1000;
 
 function getRemainingCooldown() {
     const elapsed = Date.now() - lastDpChangeTime;
@@ -14,7 +14,7 @@ function getRemainingCooldown() {
     return 0;
 }
 
-// URL එකකින් Image Buffer එකක් ලබාගැනීම (Stream Helper)
+// URL එකකින් Image Buffer එකක් ලබාගැනීම
 function fetchBufferFromUrl(url) {
     return new Promise((resolve, reject) => {
         const client = url.startsWith('https') ? https : http;
@@ -27,7 +27,7 @@ function fetchBufferFromUrl(url) {
     });
 }
 
-// Message එකකින් හෝ Quoted එකකින් Image Message එක සොයාගැනීම
+// Message එකකින් Image Message එක සොයාගැනීම
 function extractImageMessage(msg) {
     let m = msg.message;
     if (m?.ephemeralMessage?.message) m = m.ephemeralMessage.message;
@@ -47,6 +47,28 @@ function extractImageMessage(msg) {
     return null;
 }
 
+// 🖼️ 100% Working Full DP Generator (Jimp Canvas Scaler)
+async function generateFullDpBuffer(rawBuffer) {
+    const Jimp = require('jimp');
+    const image = await Jimp.read(rawBuffer);
+    const width = image.getWidth();
+    const height = image.getHeight();
+
+    // 720x720 Square Canvas එකක් සාදා පින්තූරය නොකැපෙන සේ scale කර මැදට ගැනීම
+    const max = Math.max(width, height);
+    const min = Math.min(width, height);
+
+    // Image එක square නොවේ නම් background එකක් සාදා මැදට තැබීම
+    const canvas = new Jimp(max, max, 0x000000FF); // කළු පසුබිම
+    const x = Math.floor((max - width) / 2);
+    const y = Math.floor((max - height) / 2);
+
+    canvas.composite(image, x, y);
+    canvas.resize(720, 720); // WhatsApp Best HD Resolution
+
+    return await canvas.getBufferAsync(Jimp.MIME_JPEG);
+}
+
 module.exports = {
     name: 'dp',
     aliases: ['getdp', 'setdp', 'setfulldp', 'fulldp', 'clonedp', 'clone', 'setgdp', 'gdp'],
@@ -58,7 +80,8 @@ module.exports = {
                         msg.message?.imageMessage?.caption || '';
         const command = (cmdName || rawText.trim().slice(1).split(/\s+/)[0] || 'dp').toLowerCase();
 
-        const botJid = sock.user?.id ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : null;
+        // Normalized Bot JID (LID සහ PN දෙකටම ගැලපෙන සේ)
+        const botJid = jidNormalizedUser(sock.user?.id);
 
         // =====================================================================
         // 🖼️ 1. NO-CROP FULL DP (.setfulldp / .fulldp) - OWNER ONLY
@@ -71,56 +94,48 @@ module.exports = {
             const cooldown = getRemainingCooldown();
             if (cooldown > 0) {
                 return sock.sendMessage(chatJid, { 
-                    text: `🛡️ *WhatsApp Anti-Ban Guard Active!*\n\nPlease wait *${cooldown}s* before changing DP again to prevent WhatsApp account ban.` 
+                    text: `🛡️ *WhatsApp Anti-Ban Guard!*\n\nPlease wait *${cooldown}s* before changing DP again.` 
                 }, { quoted: msg });
             }
 
             const imgMsg = extractImageMessage(msg);
             if (!imgMsg) {
-                return sock.sendMessage(chatJid, { text: '⚠️ Please reply to an image or send an image with *.setfulldp*' }, { quoted: msg });
+                return sock.sendMessage(chatJid, { text: '⚠️ Please reply to an image with *.setfulldp*' }, { quoted: msg });
             }
 
             sock.sendMessage(chatJid, { react: { text: '⏳', key: msg.key } }).catch(() => {});
 
             try {
-                let Jimp;
-                try {
-                    Jimp = require('jimp');
-                } catch {
-                    // Jimp නැතිනම් සාමාන්‍ය update එකට fallback වේ
-                }
-
                 const stream = await downloadContentFromMessage(imgMsg, 'image');
                 let rawBuffer = Buffer.from([]);
                 for await (const chunk of stream) rawBuffer = Buffer.concat([rawBuffer, chunk]);
 
-                let finalBuffer = rawBuffer;
+                // Jimp මඟින් 1:1 HD Full Canvas එකක් සකස් කිරීම
+                const fullBuffer = await generateFullDpBuffer(rawBuffer);
 
-                // Jimp මඟින් 1:1 Square Canvas එකක් සාදා ෆොටෝ එක කැපීමකින් තොරව මැදට ගැනීම
-                if (Jimp) {
-                    const jImage = await Jimp.read(rawBuffer);
-                    const width = jImage.getWidth();
-                    const height = jImage.getHeight();
-                    const max = Math.max(width, height);
+                // ⚡ Baileys updateProfilePicture මඟහැර DIRECT WHATSAPP IQ STANZA එකට යැවීම
+                await sock.query({
+                    tag: 'iq',
+                    attrs: {
+                        to: botJid,
+                        type: 'set',
+                        xmlns: 'w:profile:picture'
+                    },
+                    content: [
+                        {
+                            tag: 'picture',
+                            attrs: { type: 'image' },
+                            content: fullBuffer
+                        }
+                    ]
+                });
 
-                    const background = new Jimp(max, max, 0x000000FF);
-                    const x = Math.floor((max - width) / 2);
-                    const y = Math.floor((max - height) / 2);
-
-                    background.composite(jImage, x, y);
-                    finalBuffer = await background.getBufferAsync(Jimp.MIME_JPEG);
-                }
-
-                await sock.updateProfilePicture(botJid, finalBuffer);
                 lastDpChangeTime = Date.now();
-
-                // Memory Flush
                 rawBuffer = null;
-                finalBuffer = null;
 
                 sock.sendMessage(chatJid, { react: { text: '👑', key: msg.key } }).catch(() => {});
                 return sock.sendMessage(chatJid, { 
-                    text: `👑 *${BOT_NAME}* Full DP updated successfully! (No Crop Applied)` 
+                    text: `👑 *${BOT_NAME}* Full DP updated successfully without cropping!` 
                 }, { quoted: msg });
 
             } catch (err) {
@@ -130,7 +145,7 @@ module.exports = {
         }
 
         // =====================================================================
-        // 👥 2. GROUP DP CHANGER (.setgdp / .gdp) - GROUP ADMIN ONLY
+        // 👥 2. GROUP DP CHANGER (.setgdp / .gdp)
         // =====================================================================
         if (command === 'setgdp' || command === 'gdp') {
             if (!chatJid.endsWith('@g.us')) {
@@ -139,13 +154,12 @@ module.exports = {
 
             const imgMsg = extractImageMessage(msg);
             if (!imgMsg) {
-                return sock.sendMessage(chatJid, { text: '⚠️ Please reply to an image with *.setgdp* to update group icon.' }, { quoted: msg });
+                return sock.sendMessage(chatJid, { text: '⚠️ Please reply to an image with *.setgdp*' }, { quoted: msg });
             }
 
             sock.sendMessage(chatJid, { react: { text: '⏳', key: msg.key } }).catch(() => {});
 
             try {
-                // Bot Group Admin දැයි කලින්ම පරීක්ෂා කිරීම (Ban Risk එක අවම කරයි)
                 const groupMeta = await sock.groupMetadata(chatJid).catch(() => null);
                 if (!groupMeta) throw new Error('Could not fetch group metadata.');
 
@@ -155,14 +169,31 @@ module.exports = {
 
                 if (!isBotAdmin) {
                     sock.sendMessage(chatJid, { react: { text: '❌', key: msg.key } }).catch(() => {});
-                    return sock.sendMessage(chatJid, { text: '❌ *Permission Denied!* Bot must be an *Admin* to change group icon.' }, { quoted: msg });
+                    return sock.sendMessage(chatJid, { text: '❌ *Permission Denied!* Bot must be an *Admin*.' }, { quoted: msg });
                 }
 
                 const stream = await downloadContentFromMessage(imgMsg, 'image');
                 let buffer = Buffer.from([]);
                 for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
 
-                await sock.updateProfilePicture(chatJid, buffer);
+                const fullBuffer = await generateFullDpBuffer(buffer);
+
+                await sock.query({
+                    tag: 'iq',
+                    attrs: {
+                        to: chatJid,
+                        type: 'set',
+                        xmlns: 'w:profile:picture'
+                    },
+                    content: [
+                        {
+                            tag: 'picture',
+                            attrs: { type: 'image' },
+                            content: fullBuffer
+                        }
+                    ]
+                });
+
                 buffer = null;
 
                 sock.sendMessage(chatJid, { react: { text: '✅', key: msg.key } }).catch(() => {});
@@ -175,7 +206,7 @@ module.exports = {
         }
 
         // =====================================================================
-        // 🎭 3. DP CLONER / STEALER (.clonedp / .clone) - OWNER ONLY
+        // 🎭 3. DP CLONER (.clonedp / .clone)
         // =====================================================================
         if (command === 'clonedp' || command === 'clone') {
             if (!isDev) {
@@ -185,7 +216,7 @@ module.exports = {
             const cooldown = getRemainingCooldown();
             if (cooldown > 0) {
                 return sock.sendMessage(chatJid, { 
-                    text: `🛡️ *WhatsApp Anti-Ban Guard Active!*\n\nPlease wait *${cooldown}s* before changing DP again.` 
+                    text: `🛡️ *WhatsApp Anti-Ban Guard!*\n\nPlease wait *${cooldown}s* before changing DP again.` 
                 }, { quoted: msg });
             }
 
@@ -202,9 +233,7 @@ module.exports = {
             }
 
             if (!targetJid) {
-                return sock.sendMessage(chatJid, { 
-                    text: `⚠️ *Please reply to someone's message or tag someone to clone their DP!*\n\n*Usage:* .clonedp (reply to user)` 
-                }, { quoted: msg });
+                return sock.sendMessage(chatJid, { text: '⚠️ Please reply to someone to clone their DP!' }, { quoted: msg });
             }
 
             sock.sendMessage(chatJid, { react: { text: '🎭', key: msg.key } }).catch(() => {});
@@ -215,11 +244,25 @@ module.exports = {
                     return sock.sendMessage(chatJid, { text: '❌ Target user has no visible Profile Picture.' }, { quoted: msg });
                 }
 
-                // URL එකෙන් direct buffer එක download කර Bot ගේ DP එකට දැමීම
                 let targetBuffer = await fetchBufferFromUrl(ppUrl);
-                await sock.updateProfilePicture(botJid, targetBuffer);
-                lastDpChangeTime = Date.now();
 
+                await sock.query({
+                    tag: 'iq',
+                    attrs: {
+                        to: botJid,
+                        type: 'set',
+                        xmlns: 'w:profile:picture'
+                    },
+                    content: [
+                        {
+                            tag: 'picture',
+                            attrs: { type: 'image' },
+                            content: targetBuffer
+                        }
+                    ]
+                });
+
+                lastDpChangeTime = Date.now();
                 targetBuffer = null;
 
                 const clonedNum = targetJid.split('@')[0].split(':')[0];
@@ -235,7 +278,7 @@ module.exports = {
         }
 
         // =====================================================================
-        // 🖼️ 4. STANDARD SET DP (.setdp) - OWNER ONLY
+        // 🖼️ 4. STANDARD SET DP (.setdp)
         // =====================================================================
         if (command === 'setdp') {
             if (!isDev) {
@@ -245,13 +288,13 @@ module.exports = {
             const cooldown = getRemainingCooldown();
             if (cooldown > 0) {
                 return sock.sendMessage(chatJid, { 
-                    text: `🛡️ *WhatsApp Anti-Ban Guard Active!*\n\nPlease wait *${cooldown}s* before changing DP again.` 
+                    text: `🛡️ *WhatsApp Anti-Ban Guard!*\n\nPlease wait *${cooldown}s* before changing DP again.` 
                 }, { quoted: msg });
             }
 
             const imgMsg = extractImageMessage(msg);
             if (!imgMsg) {
-                return sock.sendMessage(chatJid, { text: `⚠️ Reply to an image or send an image with caption *.setdp*` }, { quoted: msg });
+                return sock.sendMessage(chatJid, { text: `⚠️ Reply to an image with caption *.setdp*` }, { quoted: msg });
             }
 
             sock.sendMessage(chatJid, { react: { text: '⏳', key: msg.key } }).catch(() => {});
@@ -275,7 +318,7 @@ module.exports = {
         }
 
         // =====================================================================
-        // 👤 5. GET DP (.getdp / .dp) - PUBLIC & DEV
+        // 👤 5. GET DP (.getdp / .dp)
         // =====================================================================
         if (command === 'getdp' || command === 'dp') {
             let targetJid = null;
