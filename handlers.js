@@ -12,6 +12,10 @@ if (fs.existsSync(commandsDir)) {
             try {
                 const cmd = require(path.join(commandsDir, file));
                 if (cmd.name) commands.set(cmd.name.toLowerCase(), cmd);
+                // ⚡ Aliases (setdp, getdp ආදිය) RAM Map එකට register කිරීම
+                if (cmd.aliases && Array.isArray(cmd.aliases)) {
+                    cmd.aliases.forEach(alias => commands.set(alias.toLowerCase(), cmd));
+                }
             } catch (e) {
                 console.error(`Failed to preload command ${file}:`, e.message);
             }
@@ -372,7 +376,8 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         const cmd = commands.get(commandName);
         if (cmd) {
             try {
-                await cmd.execute(sock, msg, args, isDev, BOT_NAME, cleanSender || botUserNumber);
+                // ⚡ commandName එක pass වන බැවින් dp.js හි getdp / setdp දෙකම එකවර හඳුනාගනී
+                await cmd.execute(sock, msg, args, isDev, BOT_NAME, cleanSender || botUserNumber, commandName);
             } catch (err) {
                 console.error(`Command [${commandName}] execution error:`, err.message);
             }
