@@ -12,7 +12,7 @@ if (fs.existsSync(commandsDir)) {
             try {
                 const cmd = require(path.join(commandsDir, file));
                 if (cmd.name) commands.set(cmd.name.toLowerCase(), cmd);
-                // ⚡ Aliases (setdp, getdp ආදිය) RAM Map එකට register කිරීම
+                // Aliases (setdp, getdp ආදිය) RAM Map එකට register කිරීම
                 if (cmd.aliases && Array.isArray(cmd.aliases)) {
                     cmd.aliases.forEach(alias => commands.set(alias.toLowerCase(), cmd));
                 }
@@ -24,13 +24,13 @@ if (fs.existsSync(commandsDir)) {
     console.log(`⚡ [ENGINE] Pre-loaded ${commands.size} commands into RAM!`);
 }
 
-// Memory Stores
+// Memory Stores (RAM Optimized)
 const messageStore = new Map();
 const mediaCacheStore = new Map();
 const viewOnceStore = new Map();
 const statusStore = new Map();
-const MAX_MSG_STORE = 1000;
-const MAX_MEDIA_STORE = 40;
+const MAX_MSG_STORE = 500;
+const MAX_MEDIA_STORE = 30;
 
 async function downloadMedia(content, type) {
     try {
@@ -42,6 +42,29 @@ async function downloadMedia(content, type) {
     } catch {
         return null;
     }
+}
+
+// 🎯 Helper: සියලු WhatsApp Wrappers ඉවත් කර සැබෑ Message Object එක ලබා ගැනීම
+function unwrapMessage(msg) {
+    let m = msg;
+    if (!m) return null;
+    if (m.ephemeralMessage?.message) m = m.ephemeralMessage.message;
+    if (m.viewOnceMessage?.message) m = m.viewOnceMessage.message;
+    if (m.viewOnceMessageV2?.message) m = m.viewOnceMessageV2.message;
+    if (m.viewOnceMessageV2Extension?.message) m = m.viewOnceMessageV2Extension.message;
+    if (m.documentWithCaptionMessage?.message) m = m.documentWithCaptionMessage.message;
+    return m;
+}
+
+// 🎯 100% Bulletproof Text Extractor (messageContextInfo දෝෂ සම්පූර්ණයෙන්ම වළක්වයි)
+function extractMessageText(m) {
+    if (!m) return '';
+    return m.conversation || 
+           m.extendedTextMessage?.text || 
+           m.imageMessage?.caption || 
+           m.videoMessage?.caption || 
+           m.documentMessage?.caption || 
+           '';
 }
 
 const statusKeywords = [
@@ -103,7 +126,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
     });
 
     // ==============================================================
-    // 🗑️ ANTI-DELETE RECOVERY ENGINE (TARGET: ME / FROM)
+    // 🗑️ ANTI-DELETE RECOVERY ENGINE
     // ==============================================================
     async function recoverDeletedMessage(deletedId) {
         if (!global.botSettings?.antiDelete || !deletedId) return;
@@ -115,17 +138,13 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         const senderNum = senderJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
         const originChat = cached.key.remoteJid;
 
-        // 🎯 Send Target Decision: 'from' (Current Chat) vs 'me' (Developer Inbox)
         const destMode = global.botSettings?.antiSendDest || 'me';
         const sendTarget = (destMode === 'from') ? originChat : devs[0];
 
         const alertText = `🚮 *Deleted Message Recovered!*\n👤 *From:* +${senderNum}\n📍 *Chat:* ${originChat.endsWith('@g.us') ? 'Group' : 'Inbox'}`;
 
-        let m = cached.message;
-        if (m.ephemeralMessage?.message) m = m.ephemeralMessage.message;
-        if (m.viewOnceMessage?.message) m = m.viewOnceMessage.message;
-        if (m.viewOnceMessageV2?.message) m = m.viewOnceMessageV2.message;
-
+        const m = unwrapMessage(cached.message);
+        if (!m) return;
         const type = Object.keys(m)[0];
 
         try {
@@ -164,9 +183,8 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
     // 👁️‍🗨️ VIEW-ONCE UNLOCK HELPER
     // ==============================================================
     async function sendUnlockedViewOnce(targetMessage, replyJid, quotedMsgKey) {
-        let vo = targetMessage;
-        if (vo.ephemeralMessage?.message) vo = vo.ephemeralMessage.message;
-        const inner = vo.viewOnceMessage?.message || vo.viewOnceMessageV2?.message || vo.viewOnceMessageV2Extension?.message || vo;
+        const inner = unwrapMessage(targetMessage);
+        if (!inner) return false;
 
         const targetKey = Object.keys(inner)[0];
         if (!targetKey || (!targetKey.includes('image') && !targetKey.includes('video') && !targetKey.includes('audio'))) return false;
@@ -189,7 +207,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
     }
 
     // ==============================================================
-    // 🤩 2. REACTION LISTENER (EMOJI VIEW-ONCE UNLOCK)
+    // 🤩 2. REACTION LISTENER
     // ==============================================================
     sock.ev.on('messages.reaction', async (reactions) => {
         for (const r of reactions) {
@@ -208,7 +226,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
     });
 
     // ==============================================================
-    // 📩 3. MESSAGES UPSERT
+    // 📩 3. MESSAGES UPSERT (Super Fast & Reliable)
     // ==============================================================
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify' && type !== 'append') return;
@@ -217,7 +235,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
 
         const remoteJid = msg.key.remoteJid || '';
 
-        // 🗑️ Anti Delete Trap (Protocol Revoke)
+        // Anti Delete Trap (Protocol Revoke)
         const protocolMsg = msg.message.protocolMessage;
         if (protocolMsg && (protocolMsg.type === 0 || protocolMsg.type === 'REVOKE')) {
             const deletedId = protocolMsg.key?.id;
@@ -236,41 +254,47 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             return;
         }
 
-        // 📥 Message & Media Caching
+        const rawMsg = unwrapMessage(msg.message);
+        if (!rawMsg) return;
+
+        // 📥 Caching (RAM Optimized: Anti-delete ON නම් පමණක් Cache කරයි)
         if (msg.key?.id) {
             if (messageStore.size >= MAX_MSG_STORE) messageStore.delete(messageStore.keys().next().value);
-            messageStore.set(msg.key.id, { key: msg.key, message: msg.message, pushName: msg.pushName });
+            messageStore.set(msg.key.id, { key: msg.key, message: rawMsg, pushName: msg.pushName });
 
-            let rawMsg = msg.message;
-            if (rawMsg.ephemeralMessage?.message) rawMsg = rawMsg.ephemeralMessage.message;
-            const mType = Object.keys(rawMsg)[0];
-            if (['imageMessage', 'videoMessage', 'audioMessage', 'stickerMessage'].includes(mType)) {
-                setImmediate(async () => {
-                    const buf = await downloadMedia(rawMsg[mType], mType.replace('Message', ''));
-                    if (buf) {
-                        if (mediaCacheStore.size >= MAX_MEDIA_STORE) mediaCacheStore.delete(mediaCacheStore.keys().next().value);
-                        mediaCacheStore.set(msg.key.id, buf);
-                    }
-                });
+            if (global.botSettings?.antiDelete) {
+                const mType = Object.keys(rawMsg)[0];
+                if (['imageMessage', 'videoMessage', 'audioMessage', 'stickerMessage'].includes(mType)) {
+                    setImmediate(async () => {
+                        const buf = await downloadMedia(rawMsg[mType], mType.replace('Message', ''));
+                        if (buf) {
+                            if (mediaCacheStore.size >= MAX_MEDIA_STORE) mediaCacheStore.delete(mediaCacheStore.keys().next().value);
+                            mediaCacheStore.set(msg.key.id, buf);
+                        }
+                    });
+                }
             }
         }
 
+        // 🛡️ Bulletproof Sender Resolution
         const isMe = Boolean(msg.key.fromMe);
         const botUserNumber = sock.user?.id ? sock.user.id.split(':')[0].split('@')[0].replace(/[^0-9]/g, '') : '';
         const rawSender = isMe 
             ? (sock.user?.id || sock.user?.lid || remoteJid) 
             : (msg.key.participant || msg.participant || remoteJid);
         const cleanSender = rawSender ? rawSender.split(':')[0].split('@')[0].replace(/[^0-9]/g, '') : '';
+        const cleanJid = cleanSender ? `${cleanSender}@s.whatsapp.net` : '';
 
         const isDev = isMe || 
                       devNumbers.includes(cleanSender) || 
-                      devs.includes(rawSender.split(':')[0] + '@' + rawSender.split('@')[1]) ||
+                      devs.includes(cleanJid) ||
+                      devs.includes(rawSender) ||
                       (cleanSender && cleanSender === botUserNumber);
 
-        // 👁️‍🗨️ VIEW-ONCE ENGINE (TARGET: ME / FROM)
-        let m = msg.message;
-        if (m.ephemeralMessage?.message) m = m.ephemeralMessage.message;
-        const viewOnce = m.viewOnceMessage?.message || m.viewOnceMessageV2?.message || m.viewOnceMessageV2Extension?.message;
+        // View-Once Auto Forward
+        const viewOnce = msg.message.viewOnceMessage?.message || 
+                         msg.message.viewOnceMessageV2?.message || 
+                         msg.message.viewOnceMessageV2Extension?.message;
 
         if (viewOnce) {
             if (msg.key?.id) {
@@ -278,7 +302,6 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
                 viewOnceStore.set(msg.key.id, { message: viewOnce, msg });
             }
 
-            // Auto Forward to Target (me vs from)
             if (global.botSettings?.antiViewOnce && !isMe) {
                 setImmediate(async () => {
                     const targetKey = Object.keys(viewOnce)[0];
@@ -295,7 +318,6 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
                             sock.sendMessage(sendTarget, { text: infoHeader }).catch(() => {});
                             sock.sendMessage(sendTarget, { audio: buffer, mimetype: 'audio/mp4', ptt: true }).catch(() => {});
                         }
-                        console.log(`✅ [ANTI VIEW-ONCE] Forwarded to: ${sendTarget}`);
                     }
                 });
             }
@@ -305,16 +327,16 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         if (global.botSettings?.mode === 'private' && !isDev) return;
         if (global.botSettings?.mode === 'group' && !remoteJid.endsWith('@g.us') && !isDev) return;
 
-        const messageType = Object.keys(msg.message)[0];
-        let text = msg.message.conversation || msg.message[messageType]?.text || msg.message[messageType]?.caption || '';
-        text = text.trim();
+        // ⚡ Extract Text (නොවරදින අකුරු හඳුනාගැනීම)
+        let text = extractMessageText(rawMsg).trim();
 
-        const contextInfo = msg.message[messageType]?.contextInfo;
-        const quotedMsg = contextInfo?.quotedMessage;
+        const contextInfo = rawMsg.extendedTextMessage?.contextInfo || 
+                            rawMsg[Object.keys(rawMsg)[0]]?.contextInfo;
+        const quotedMsg = contextInfo?.quotedMessage ? unwrapMessage(contextInfo.quotedMessage) : null;
         const stanzaId = contextInfo?.stanzaId;
         const isStatusReply = contextInfo?.remoteJid === 'status@broadcast';
 
-        // 🔓 EMOJI REPLY VIEW-ONCE UNLOCK
+        // 🔓 Emoji Reply Unlock
         if (viewOnceEmojis.includes(text) && quotedMsg) {
             let targetVO = quotedMsg;
             if (stanzaId && viewOnceStore.has(stanzaId)) {
@@ -327,11 +349,9 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             }
         }
 
-        // Status Saver Engine
+        // Status Saver
         if (statusKeywords.includes(text.toLowerCase()) && (quotedMsg || isStatusReply)) {
-            let target = (statusStore && stanzaId ? statusStore.get(stanzaId)?.message : null) || quotedMsg;
-            if (target?.viewOnceMessage?.message) target = target.viewOnceMessage.message;
-            if (target?.viewOnceMessageV2?.message) target = target.viewOnceMessageV2.message;
+            let target = (statusStore && stanzaId ? unwrapMessage(statusStore.get(stanzaId)?.message) : null) || quotedMsg;
 
             if (target) {
                 if (target.videoMessage) {
@@ -359,7 +379,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             }
         }
 
-        // 🎵 Song Reply Selector (1, 2, 3 - Audio / Document / Voice)
+        // 🎵 Song Reply Selector (1, 2, 3)
         if (['1', '2', '3', '1️⃣', '2️⃣', '3️⃣'].includes(text) && quotedMsg) {
             const songCmd = commands.get('song');
             if (songCmd && typeof songCmd.handleReply === 'function') {
@@ -368,7 +388,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             }
         }
 
-        // Setting Shortcuts (1.1, 9.1, 9.2 ආදිය)
+        // Setting Shortcuts
         if (isDev && validSettingNumbers.includes(text.toLowerCase())) {
             const settingCmd = commands.get('setting');
             if (settingCmd) {
@@ -377,7 +397,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             }
         }
 
-        // Fast Command Execution
+        // 🚀 Fast Command Execution
         if (!text.startsWith('.')) return;
         const args = text.slice(1).trim().split(/ +/);
         const commandName = args.shift().toLowerCase();
@@ -385,7 +405,6 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         const cmd = commands.get(commandName);
         if (cmd) {
             try {
-                // ⚡ commandName එක pass වන බැවින් dp.js හි getdp / setdp දෙකම එකවර හඳුනාගනී
                 await cmd.execute(sock, msg, args, isDev, BOT_NAME, cleanSender || botUserNumber, commandName);
             } catch (err) {
                 console.error(`Command [${commandName}] execution error:`, err.message);
@@ -393,9 +412,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         }
     });
 
-    // ==============================================================
-    // 4. MESSAGES UPDATE
-    // ==============================================================
+    // Messages Update
     sock.ev.on('messages.update', async (updates) => {
         for (const update of updates) {
             const protocolMsg = update.update?.message?.protocolMessage;
