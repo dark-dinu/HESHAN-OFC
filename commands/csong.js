@@ -1,177 +1,132 @@
-const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execFile } = require('child_process');
+const https = require('https');
+const http = require('http');
+const { exec } = require('child_process');
 
-// ───────────── FFmpeg path ─────────────
-let ffmpegPath = 'ffmpeg';
-try {
-    ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
-} catch (e) {
-    ffmpegPath = 'ffmpeg';
-}
-
-// 🔑 Chamindu Official Working API Key
+// 🔑 Chamindu Official API Key
 const API_KEY = process.env.CHAMINDU_API_KEY || 'chama_api_ec9848130d1aea209f08fb85e0b4720f';
-
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-const MAX_DURATION_SEC = 15 * 60; // තත්පර 900 ට වැඩි සින්දු skip
 
-// 🛡️ Spam / Loop Guard (එකම මැසේජ් එක නැවත නැවත Run වීම වැළැක්වීම)
-const processedMessages = new Set();
-let isCurrentlyProcessing = false;
-
-// ───────────── Helpers ─────────────
-function parseDuration(text) {
-    if (!text) return 0;
-    const p = String(text).split(':').map(Number);
-    if (p.some(isNaN)) return 0;
-    return p.reduce((acc, n) => acc * 60 + n, 0);
-}
-
-function formatDuration(sec) {
-    sec = Math.max(0, Math.round(sec));
-    const h = Math.floor(sec / 3600);
-    const m = Math.floor((sec % 3600) / 60);
-    const s = sec % 60;
-    const ss = String(s).padStart(2, '0');
-    return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
-}
-
-function cleanup(...files) {
-    for (const f of files) {
-        try { if (f && fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {}
-    }
-}
-
-function runFfmpeg(args) {
+// ── Native JSON Fetcher (Axios නැතත් වැඩ කරයි) ──
+function fetchJson(url) {
     return new Promise((resolve) => {
-        execFile(ffmpegPath, args, { timeout: 120000, maxBuffer: 20 * 1024 * 1024 }, (error, stdout, stderr) => {
-            resolve({ error, stderr: stderr || '' });
+        const client = url.startsWith('https') ? https : http;
+        const req = client.get(url, { headers: { 'User-Agent': UA } }, (res) => {
+            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                return fetchJson(res.headers.location).then(resolve);
+            }
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                try { resolve(JSON.parse(data)); } catch (e) { resolve(null); }
+            });
+        });
+        req.on('error', () => resolve(null));
+        req.setTimeout(25000, () => { req.destroy(); resolve(null); });
+    });
+}
+
+// ── Native Buffer Downloader ──
+function downloadBuffer(url) {
+    return new Promise((resolve) => {
+        const client = url.startsWith('https') ? https : http;
+        const req = client.get(url, { headers: { 'User-Agent': UA } }, (res) => {
+            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                return downloadBuffer(res.headers.location).then(resolve);
+            }
+            const chunks = [];
+            res.on('data', chunk => chunks.push(chunk));
+            res.on('end', () => resolve(Buffer.concat(chunks)));
+        });
+        req.on('error', () => resolve(null));
+        req.setTimeout(60000, () => { req.destroy(); resolve(null); });
+    });
+}
+
+// ── FFmpeg WhatsApp Voice Note (OGG Opus) Converter ──
+function convertToWhatsAppVoice(inputBuffer) {
+    return new Promise((resolve) => {
+        let ffmpegBinary = 'ffmpeg';
+        try {
+            ffmpegBinary = require('@ffmpeg-installer/ffmpeg').path;
+        } catch (e) {
+            ffmpegBinary = 'ffmpeg';
+        }
+
+        const tempId = Date.now() + '_' + Math.random().toString(36).substring(7);
+        const tempInput = path.join(os.tmpdir(), `in_${tempId}.mp3`);
+        const tempOutput = path.join(os.tmpdir(), `out_${tempId}.opus`);
+
+        fs.writeFile(tempInput, inputBuffer, (err) => {
+            if (err) return resolve({ buffer: inputBuffer, isOpus: false });
+
+            const cmd = `"${ffmpegBinary}" -y -i "${tempInput}" -c:a libopus -b:a 64k -vbr on -compression_level 10 -ar 48000 -ac 1 "${tempOutput}"`;
+
+            exec(cmd, (error) => {
+                try { if (fs.existsSync(tempInput)) fs.unlinkSync(tempInput); } catch (e) {}
+
+                if (!error && fs.existsSync(tempOutput)) {
+                    try {
+                        const outBuf = fs.readFileSync(tempOutput);
+                        fs.unlinkSync(tempOutput);
+                        return resolve({ buffer: outBuf, isOpus: true });
+                    } catch (e) {}
+                }
+
+                // FFmpeg නැතිනම් raw buffer එකෙන් වැඩ කරයි (Crash වෙන්නේ නෑ)
+                resolve({ buffer: inputBuffer, isOpus: false });
+            });
         });
     });
 }
 
-function parseFfmpegDuration(stderr) {
-    const m = stderr.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
-    if (!m) return 0;
-    return Math.round(Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]));
-}
+// ── Fast YouTube Search Scraper ──
+function searchYouTube(query) {
+    return new Promise((resolve) => {
+        const isUrl = /(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com|youtu\.be)/i.test(query);
+        const searchUrl = isUrl ? query : `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
 
-// Audio buffer → WhatsApp voice note (OGG Opus)
-async function convertToWhatsAppVoice(inputBuffer) {
-    const id = Date.now() + '_' + Math.random().toString(36).substring(2, 8);
-    const tempInput = path.join(os.tmpdir(), `csong_in_${id}.bin`);
-    const tempOutput = path.join(os.tmpdir(), `csong_out_${id}.ogg`);
-
-    try {
-        fs.writeFileSync(tempInput, inputBuffer);
-
-        const { error, stderr } = await runFfmpeg([
-            '-y', '-i', tempInput,
-            '-vn',
-            '-c:a', 'libopus',
-            '-b:a', '64k',
-            '-vbr', 'on',
-            '-ar', '48000',
-            '-ac', '1',
-            '-f', 'ogg',
-            tempOutput
-        ]);
-
-        if (error || !fs.existsSync(tempOutput) || fs.statSync(tempOutput).size < 1000) {
-            console.error('[FFMPEG ERROR]:', (stderr || '').slice(-500));
-            throw new Error('FFmpeg convert කිරීම අසාර්ථකයි.');
-        }
-
-        const buffer = fs.readFileSync(tempOutput);
-        const probe = await runFfmpeg(['-i', tempOutput]);
-        const seconds = parseFfmpegDuration(probe.stderr);
-
-        return { buffer, seconds };
-    } finally {
-        cleanup(tempInput, tempOutput);
-    }
-}
-
-function findVideoRenderer(node) {
-    if (!node || typeof node !== 'object') return null;
-    if (node.videoRenderer && node.videoRenderer.videoId) return node.videoRenderer;
-    for (const key of Object.keys(node)) {
-        const found = findVideoRenderer(node[key]);
-        if (found) return found;
-    }
-    return null;
-}
-
-function extractVideoId(text) {
-    const m = text.match(/(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/)([\w-]{11})/i);
-    return m ? m[1] : null;
-}
-
-// ───────────── YouTube Search ─────────────
-async function searchYouTube(query) {
-    const directId = extractVideoId(query);
-    if (directId) {
-        const url = `https://www.youtube.com/watch?v=${directId}`;
-        let title = 'Channel Song';
-        try {
-            const r = await axios.get(`https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`, { timeout: 10000 });
-            title = r.data?.title || title;
-        } catch (e) {}
-        return { videoId: directId, url, title, durationSec: 0, thumbnail: `https://i.ytimg.com/vi/${directId}/hqdefault.jpg` };
-    }
-
-    try {
-        const yts = require('yt-search');
-        const r = await yts(query);
-        const v = r.videos && r.videos[0];
-        if (v) {
-            return {
-                videoId: v.videoId,
-                url: v.url,
-                title: v.title,
-                durationSec: v.seconds || 0,
-                thumbnail: `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg`
-            };
-        }
-    } catch (e) {}
-
-    try {
-        const res = await axios.get('https://www.youtube.com/results', {
-            params: { search_query: query, hl: 'en' },
-            timeout: 15000,
+        https.get(searchUrl, {
             headers: {
                 'User-Agent': UA,
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Cookie': 'CONSENT=YES+1; SOCS=CAI'
+                'Accept-Language': 'en-US,en;q=0.9'
             }
-        });
-        const html = String(res.data);
-        const m = html.match(/var ytInitialData\s*=\s*({.+?});\s*<\/script>/s)
-            || html.match(/ytInitialData"\]\s*=\s*({.+?});\s*<\/script>/s)
-            || html.match(/ytInitialData\s*=\s*({.+?});/s);
-        if (!m) return null;
+        }, (res) => {
+            let html = '';
+            res.on('data', chunk => html += chunk);
+            res.on('end', () => {
+                try {
+                    const jsonMatch = html.match(/ytInitialData\s*=\s*({.+?});<\/script>/);
+                    if (!jsonMatch) return resolve(null);
 
-        const data = JSON.parse(m[1]);
-        const vr = findVideoRenderer(data);
-        if (!vr) return null;
+                    const data = JSON.parse(jsonMatch[1]);
+                    const contents = data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents[0]?.itemSectionRenderer?.contents;
+                    if (!contents) return resolve(null);
 
-        return {
-            videoId: vr.videoId,
-            url: `https://www.youtube.com/watch?v=${vr.videoId}`,
-            title: vr.title?.runs?.[0]?.text || 'Channel Song',
-            durationSec: parseDuration(vr.lengthText?.simpleText),
-            thumbnail: `https://i.ytimg.com/vi/${vr.videoId}/hqdefault.jpg`
-        };
-    } catch (e) {
-        console.error('[YT SEARCH ERROR]:', e.message);
-        return null;
-    }
+                    for (const item of contents) {
+                        const vr = item.videoRenderer;
+                        if (vr && vr.videoId) {
+                            return resolve({
+                                videoId: vr.videoId,
+                                url: `https://www.youtube.com/watch?v=${vr.videoId}`,
+                                title: vr.title?.runs?.[0]?.text || 'Channel Song',
+                                duration: vr.lengthText?.simpleText || '3:30',
+                                thumbnail: `https://i.ytimg.com/vi/${vr.videoId}/hqdefault.jpg`
+                            });
+                        }
+                    }
+                    resolve(null);
+                } catch {
+                    resolve(null);
+                }
+            });
+        }).on('error', () => resolve(null));
+    });
 }
 
-// ───────────── Download URL ලබා ගැනීම ─────────────
+// ── Chamindu API Stream Link Resolver ──
 async function getAudioDownloadUrl(videoUrl) {
     const enc = encodeURIComponent(videoUrl);
     const endpoints = [
@@ -181,56 +136,22 @@ async function getAudioDownloadUrl(videoUrl) {
     ];
 
     for (const ep of endpoints) {
-        try {
-            const res = await axios.get(ep, { timeout: 25000 });
-            const d = res.data || {};
-            const inner = d.data || d.result || {};
-            const link = inner.direct_url || inner.download_url || inner.url || inner.link
-                || d.direct_url || d.download_url || d.download_link || d.url;
+        const res = await fetchJson(ep);
+        if (res) {
+            const link = res.data?.direct_url || res.data?.download_url || res.data?.download_link 
+                      || res.direct_url || res.download_url || res.download_link;
             if (typeof link === 'string' && /^https?:\/\//i.test(link)) return link;
-        } catch (e) {}
+        }
     }
     return null;
 }
 
-async function downloadBuffer(url, timeout = 60000) {
-    const res = await axios.get(url, {
-        responseType: 'arraybuffer',
-        timeout,
-        maxRedirects: 5,
-        maxContentLength: 60 * 1024 * 1024,
-        headers: { 'User-Agent': UA }
-    });
-    return Buffer.from(res.data);
-}
-
-// ───────────── Command ─────────────
 module.exports = {
     name: 'csong',
     aliases: ['channelsong', 'cvoice', 'cplay'],
     execute: async (sock, msg, args, isDev, BOT_NAME, cleanSender) => {
         const from = msg.key.remoteJid;
-        const msgId = msg.key.id;
-
-        // 🛡️ 1. Duplicate Run Trap (එකම මැසේජ් ID එක දෙපාරක් Execute වීම වළක්වයි)
-        if (msgId && processedMessages.has(msgId)) return;
-        if (msgId) {
-            processedMessages.add(msgId);
-            if (processedMessages.size > 50) processedMessages.delete(processedMessages.keys().next().value);
-        }
-
-        // 🛡️ 2. Old Message Filter (විනාඩි 2කට වඩා පරණ මැසේජ් Bot Restart වෙද්දී Run වීම නවත්වයි)
-        const msgTimestamp = msg.messageTimestamp;
-        if (msgTimestamp && (Date.now() / 1000 - Number(msgTimestamp)) > 120) {
-            return;
-        }
-
-        // 🛡️ 3. Concurrency Lock (එක සින්දුවක් Process වෙද්දී තව එකක් එක පිට වැටීම වළක්වයි)
-        if (isCurrentlyProcessing) {
-            return sock.sendMessage(from, { text: '⏳ කලින් සින්දුව Channel එකට Post වෙමින් පවතී. කරුණාකර තත්පර කිහිපයක් ඉවසන්න...' }, { quoted: msg });
-        }
-
-        const botName = BOT_NAME || 'Bot';
+        const botName = BOT_NAME || '𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂';
         const fullText = (args || []).join(' ').trim();
         const react = (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } }).catch(() => {});
 
@@ -240,7 +161,7 @@ module.exports = {
             }, { quoted: msg });
         }
 
-        // ── Link සහ නම වෙන් කිරීම ──
+        // Link සහ සින්දුවේ නම වෙන් කිරීම
         const linkMatch = fullText.match(/https?:\/\/(?:www\.)?whatsapp\.com\/channel\/[^\s,]+/i);
         let channelLink = '';
         let songName = '';
@@ -258,35 +179,87 @@ module.exports = {
             return sock.sendMessage(from, { text: '⚠️ සින්දුවේ නම ලබාදෙන්න!' }, { quoted: msg });
         }
 
+        // /392 වැනි post IDs ඉවත් කර Invite Code එක පමණක් ගැනීම[span_0](start_span)[span_0](end_span)[span_1](start_span)[span_1](end_span)
         const inviteCode = channelLink.split('whatsapp.com/channel/')[1]?.split(/[\/?#]/)[0]?.trim();
         if (!inviteCode) {
             return sock.sendMessage(from, { text: '❌ වලංගු WhatsApp Channel Link එකක් ලබාදෙන්න!' }, { quoted: msg });
         }
 
-        isCurrentlyProcessing = true;
         react('⏳');
 
         try {
-            // 1. Channel JID
-            let channelJid;
+            // 1. Channel JID එක ලබා ගැනීම
+            let channelJid = null;
             try {
                 const meta = await sock.newsletterMetadata('invite', inviteCode);
                 channelJid = meta?.id;
             } catch (e) {
-                console.error('[NEWSLETTER META ERROR]:', e.message);
+                console.error('[CSONG NEWSLETTER ERROR]:', e.message);
             }
+
             if (!channelJid) {
                 react('❌');
                 return sock.sendMessage(from, { text: '❌ Channel එක සොයාගත නොහැකි විය. Link එක පරීක්ෂා කරන්න.' }, { quoted: msg });
             }
 
-            // 2. YouTube search
+            // 2. YouTube Search
             const video = await searchYouTube(songName);
             if (!video) {
                 react('❌');
                 return sock.sendMessage(from, { text: '❌ සින්දුව සොයාගත නොහැකි විය.' }, { quoted: msg });
             }
 
-            if (video.durationSec > MAX_DURATION_SEC) {
+            // 3. Audio Download Stream ලබා ගැනීම
+            const audioUrl = await getAudioDownloadUrl(video.url);
+            if (!audioUrl) {
                 react('❌');
-                return sock.sendMessage(from, { text: `❌ සින්දුව ඉතා දිගයි (${formatDuration(video.durationSec)}). විනාඩි ${MAX_DURATION_SEC / 60} ට අඩු එකක් තෝරන්න.` }, {
+                return sock.sendMessage(from, { text: '❌ Audio Download link එක ලබාගැනීමට නොහැකි විය.' }, { quoted: msg });
+            }
+
+            const rawBuffer = await downloadBuffer(audioUrl);
+            if (!rawBuffer || rawBuffer.length < 5000) {
+                react('❌');
+                return sock.sendMessage(from, { text: '❌ Audio file එක download කරගැනීම අසාර්ථක විය.' }, { quoted: msg });
+            }
+
+            // 4. Voice Note බවට Convert කිරීම
+            const voice = await convertToWhatsAppVoice(rawBuffer);
+
+            // 5. Thumbnail Card එක සකස් කිරීම
+            const thumbBuffer = await downloadBuffer(video.thumbnail);
+
+            const cardCaption = 
+`🥰⃝🎶 *“ ${video.title} ”*
+
+0:00 ◁◁  II  ▷▷ ${video.duration}
+
+Use Headphones For Best Experience.... 🧚‍♀️🎵
+
+| ☘️ *${botName}*`;
+
+            // 6. Channel එකට Card එක යැවීම
+            if (thumbBuffer && thumbBuffer.length > 1000) {
+                await sock.sendMessage(channelJid, { image: thumbBuffer, caption: cardCaption });
+            } else {
+                await sock.sendMessage(channelJid, { text: cardCaption });
+            }
+
+            // 7. Channel එකට Original Voice Note එක යැවීම
+            await sock.sendMessage(channelJid, {
+                audio: voice.buffer,
+                mimetype: voice.isOpus ? 'audio/ogg; codecs=opus' : 'audio/mp4',
+                ptt: true
+            });
+
+            react('✅');
+            return sock.sendMessage(from, {
+                text: `✅ *"${video.title}"*\nChannel එකට Voice Note එකක් ලෙස සාර්ථකව Post කරන ලදී! 🎙️🔥`
+            }, { quoted: msg });
+
+        } catch (err) {
+            console.error('[CSONG MAIN ERROR]:', err);
+            react('❌');
+            return sock.sendMessage(from, { text: `❌ Error: ${err.message || 'Failed to post'}` }, { quoted: msg });
+        }
+    }
+};
