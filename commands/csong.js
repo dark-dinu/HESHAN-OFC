@@ -12,8 +12,7 @@ try {
     ffmpegPath = 'ffmpeg';
 }
 
-// ⚠️ පරණ key එක public වුණා. අලුත් key එකක් generate කරලා Render > Environment එකේ CHAMINDU_API_KEY ලෙස දාන්න.
-const API_KEY = process.env.CHAMINDU_API_KEY || 'PUT_NEW_KEY_HERE';
+const API_KEY = process.env.CHAMINDU_API_KEY || 'chama_api_ec9848130d1aea209f08fb85e0b4720f';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 const MAX_DURATION_SEC = 15 * 60; // තත්පර 900 ට වැඩි සින්දු skip
