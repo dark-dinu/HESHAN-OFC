@@ -359,6 +359,15 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             }
         }
 
+        // 🎵 Song Reply Selector (1, 2, 3 - Audio / Document / Voice)
+        if (['1', '2', '3', '1️⃣', '2️⃣', '3️⃣'].includes(text) && quotedMsg) {
+            const songCmd = commands.get('song');
+            if (songCmd && typeof songCmd.handleReply === 'function') {
+                const isHandled = await songCmd.handleReply(sock, msg, text, BOT_NAME);
+                if (isHandled) return;
+            }
+        }
+
         // Setting Shortcuts (1.1, 9.1, 9.2 ආදිය)
         if (isDev && validSettingNumbers.includes(text.toLowerCase())) {
             const settingCmd = commands.get('setting');
