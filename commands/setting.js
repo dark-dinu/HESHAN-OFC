@@ -10,6 +10,7 @@ if (fs.existsSync(logoPath)) {
 
 module.exports = {
     name: 'setting',
+    aliases: ['settings', 'config'],
     execute: async (sock, msg, args, isDev, BOT_NAME, cleanSender) => {
         const chatJid = msg.key.remoteJid;
 
@@ -83,9 +84,15 @@ _(Anti Delete & Anti View-Once Destination)_
 *9.1  ➥  ᴍᴇ 👤 (Private Inbox)*
 *9.2  ➥  ꜰʀᴏᴍ 👥 (Current Chat)* [${currentDest}]
 
+🔟 *𝐀𝐔𝐓𝐎 𝐑𝐄𝐀𝐃 𝐌𝐄𝐒𝐒𝐀𝐆𝐄 📖*
+_(Chat Messages Auto Read / Blue Tick)_
+
+*10.1 ➥  ᴏɴ ✔️*
+*10.2 ➥  ᴏꜰꜰ ❌* [${status(current.autoRead)}]
+
 > *❬ ${BOT_NAME} 𝐒𝐄𝐓𝐓𝐈𝐍𝐆  🛠️ ❭*
 
-*💡 Quick Set:* Reply with number (e.g. *9.1*)`;
+*💡 Quick Set:* Reply with number (e.g. *10.1*)`;
 
             if (logoBuffer) {
                 return sock.sendMessage(chatJid, { image: logoBuffer, caption: menu }, { quoted: msg });
@@ -125,7 +132,10 @@ _(Anti Delete & Anti View-Once Destination)_
             '8.2': ['antiCall', false, 'Anti Call OFF ❌'],
 
             '9.1': ['antiSendDest', 'me', 'Anti Send Target: ME 👤 (Private Inbox)'],
-            '9.2': ['antiSendDest', 'from', 'Anti Send Target: FROM 👥 (Current Chat)']
+            '9.2': ['antiSendDest', 'from', 'Anti Send Target: FROM 👥 (Current Chat)'],
+
+            '10.1': ['autoRead', true, 'Auto Read Messages ON ✔️ (Blue Tick Active)'],
+            '10.2': ['autoRead', false, 'Auto Read Messages OFF ❌']
         };
 
         const target = map[action];
