@@ -32,89 +32,104 @@ const devs = [
     '15947733680169@lid'
 ];
 
-const SESSION_DIR = path.join(__dirname, 'session');
+// 🤖 Dual Bot Configuration
+const BOTS = {
+    1: {
+        id: 'bot_1',
+        name: `${BOT_NAME} #1`,
+        sessionDir: path.join(__dirname, 'session_1'),
+        sock: null,
+        isStarting: false,
+        reconnectTimer: null
+    },
+    2: {
+        id: 'bot_2',
+        name: `${BOT_NAME} #2`,
+        sessionDir: path.join(__dirname, 'session_2'),
+        sock: null,
+        isStarting: false,
+        reconnectTimer: null
+    }
+};
 
-let sock = null;
-let isStarting = false;
-let reconnectTimer = null;
-let hasSentBootAlert = false;
-
-async function restoreFullSession() {
+// 🛡️ Multi-Session Restore from Cloud
+async function restoreSession(botNum) {
+    const bot = BOTS[botNum];
     try {
-        if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
-
-        const credsPath = path.join(SESSION_DIR, 'creds.json');
+        if (!fs.existsSync(bot.sessionDir)) fs.mkdirSync(bot.sessionDir, { recursive: true });
+        const credsPath = path.join(bot.sessionDir, 'creds.json');
         if (fs.existsSync(credsPath)) return true;
 
-        const saved = await getSession('main_session');
-        if (!saved) return false;
+        const saved = await getSession(bot.id);
+        if (!saved || !saved.files) return false;
 
-        if (saved.files && typeof saved.files === 'object') {
-            for (const [fileName, content] of Object.entries(saved.files)) {
-                fs.writeFileSync(path.join(SESSION_DIR, fileName), content, 'utf-8');
-            }
-            return true;
+        for (const [fileName, content] of Object.entries(saved.files)) {
+            fs.writeFileSync(path.join(bot.sessionDir, fileName), content, 'utf-8');
         }
-        return false;
-    } catch (e) {
+        return true;
+    } catch {
         return false;
     }
 }
 
-async function backupFullSession() {
+// 🛡️ Multi-Session Backup to Cloud
+async function backupSession(botNum) {
+    const bot = BOTS[botNum];
     try {
-        if (!fs.existsSync(SESSION_DIR)) return;
-        const fileNames = fs.readdirSync(SESSION_DIR);
+        if (!fs.existsSync(bot.sessionDir)) return;
+        const fileNames = fs.readdirSync(bot.sessionDir);
         if (!fileNames.includes('creds.json')) return;
 
         const filesMap = {};
         for (const file of fileNames) {
-            const filePath = path.join(SESSION_DIR, file);
+            const filePath = path.join(bot.sessionDir, file);
             if (fs.statSync(filePath).isFile()) {
                 filesMap[file] = fs.readFileSync(filePath, 'utf-8');
             }
         }
-
         if (Object.keys(filesMap).length > 0) {
-            await saveSession('main_session', { files: filesMap });
+            await saveSession(bot.id, { files: filesMap });
         }
-    } catch (e) {}
+    } catch {}
 }
 
-function cleanupSocket() {
-    if (sock) {
+function cleanupSocket(botNum) {
+    const bot = BOTS[botNum];
+    if (bot.sock) {
         try {
-            sock.ev.removeAllListeners();
-            if (sock.ws) {
-                sock.ws.removeAllListeners();
-                sock.ws.terminate();
+            bot.sock.ev.removeAllListeners();
+            if (bot.sock.ws) {
+                bot.sock.ws.removeAllListeners();
+                bot.sock.ws.terminate();
             }
-            sock.end(undefined);
-        } catch (e) {}
-        sock = null;
+            bot.sock.end(undefined);
+        } catch {}
+        bot.sock = null;
     }
 }
 
-function scheduleReconnect(delayMs = 1000) {
-    if (reconnectTimer) clearTimeout(reconnectTimer);
-    reconnectTimer = setTimeout(() => {
-        reconnectTimer = null;
-        startBot();
+function scheduleReconnect(botNum, delayMs = 1500) {
+    const bot = BOTS[botNum];
+    if (bot.reconnectTimer) clearTimeout(bot.reconnectTimer);
+    bot.reconnectTimer = setTimeout(() => {
+        bot.reconnectTimer = null;
+        startBotInstance(botNum);
     }, delayMs);
 }
 
-async function startBot() {
-    if (isStarting) return;
-    isStarting = true;
+// ⚡ Dynamic Single/Dual Bot Runner
+async function startBotInstance(botNum) {
+    const bot = BOTS[botNum];
+    if (bot.isStarting) return;
+    bot.isStarting = true;
 
-    cleanupSocket();
+    cleanupSocket(botNum);
 
     try {
-        await restoreFullSession();
+        await restoreSession(botNum);
+        const { state, saveCreds } = await useMultiFileAuthState(bot.sessionDir);
 
-        const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
-
-        sock = makeWASocket({
+        bot.sock = makeWASocket({
             auth: {
                 creds: state.creds,
                 keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'fatal' }))
@@ -135,104 +150,235 @@ async function startBot() {
             defaultQueryTimeoutMs: 60000
         });
 
-        sock.ev.on('creds.update', saveCreds);
+        bot.sock.ev.on('creds.update', saveCreds);
 
-        // Handlers Register කිරීම
-        registerAllHandlers(sock, devs, devNumbers, BOT_NAME);
+        // Register Handlers with Bot instance ID
+        registerAllHandlers(bot.sock, devs, devNumbers, BOT_NAME, botNum);
 
-        sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
+        bot.sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
             if (connection === 'close') {
-                isStarting = false;
+                bot.isStarting = false;
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
 
                 if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-                    console.log('🔴 [AUTH] Logged out. Performing Factory Reset...');
-                    if (fs.existsSync(SESSION_DIR)) fs.rmSync(SESSION_DIR, { recursive: true, force: true });
-                    await purgeAllUserData();
-                    scheduleReconnect(3000);
+                    console.log(`🔴 [BOT #${botNum}] Logged out. Resetting...`);
+                    if (fs.existsSync(bot.sessionDir)) fs.rmSync(bot.sessionDir, { recursive: true, force: true });
+                    await deleteSession(bot.id);
+                    scheduleReconnect(botNum, 3000);
                 } else if (statusCode === DisconnectReason.restartRequired || statusCode === 515) {
-                    console.log('🔄 Restart required (515) - Reconnecting...');
-                    scheduleReconnect(500);
+                    console.log(`🔄 [BOT #${botNum}] Restart required (515)...`);
+                    scheduleReconnect(botNum, 500);
                 } else {
-                    scheduleReconnect(2000);
+                    scheduleReconnect(botNum, 2000);
                 }
             } else if (connection === 'open') {
-                isStarting = false;
-                console.log(`✅ [ENGINE] ${BOT_NAME} Live & Operational!`);
-                startSchedulerEngine(sock);
+                bot.isStarting = false;
+                console.log(`✅ [BOT #${botNum}] Connected & Live!`);
+                if (botNum === 1) startSchedulerEngine(bot.sock);
 
-                setTimeout(() => backupFullSession(), 3000);
+                setTimeout(() => backupSession(botNum), 3000);
 
                 if (global.botSettings?.alwaysOnline) {
-                    sock.sendPresenceUpdate('available').catch(() => {});
+                    bot.sock.sendPresenceUpdate('available').catch(() => {});
                 }
 
-                if (!hasSentBootAlert) {
-                    hasSentBootAlert = true;
-                    setTimeout(async () => {
-                        try {
-                            const devJid = devs[0];
-                            await sock.sendMessage(devJid, { 
-                                text: `⚡ *${BOT_NAME}* Online & Ready!\n\n🟢 *Engine Status:* Operational\n⏱️ *Response:* Sub-second Fast\n🔒 *Security:* End-to-End Encrypted` 
-                            });
-                        } catch (err) {}
-                    }, 2000);
-                }
+                // Send Startup Alert
+                try {
+                    const ownJid = bot.sock.user?.id ? bot.sock.user.id.split(':')[0] + '@s.whatsapp.net' : devs[0];
+                    await bot.sock.sendMessage(ownJid, { 
+                        text: `⚡ *${BOT_NAME} [Instance #${botNum}]* Online & Ready!\n\n🟢 *Engine Status:* Operational\n⏱️ *Response:* Sub-second Fast\n🔒 *Security:* End-to-End Encrypted` 
+                    });
+                } catch {}
             }
         });
 
     } catch (err) {
-        isStarting = false;
-        console.error('Engine Init Error:', err.message);
-        scheduleReconnect(3000);
+        bot.isStarting = false;
+        console.error(`[BOT #${botNum} INIT ERROR]:`, err.message);
+        scheduleReconnect(botNum, 3000);
     }
 }
 
-// 🌐 Pair Portal
+// 🌐 Unified Dual-Bot Pairing Portal
 app.get('/', (req, res) => res.redirect('/pair'));
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
 app.get('/pair', (req, res) => {
-    res.send(`<!DOCTYPE html><html><head><title>${BOT_NAME} - Pair</title><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>body{background:#0b0e14;color:#fff;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif}.card{background:#151a23;padding:30px;border-radius:15px;text-align:center;max-width:380px;width:90%}input{width:100%;padding:12px;margin:15px 0;border-radius:8px;border:1px solid #333;background:#0b0e14;color:#fff;text-align:center;font-size:16px;box-sizing:border-box}button{width:100%;padding:12px;background:#00e676;border:none;border-radius:8px;font-weight:bold;cursor:pointer}#code{margin-top:20px;font-size:24px;color:#00e676;letter-spacing:3px;font-weight:bold;cursor:pointer}</style></head><body><div class="card"><h2>${BOT_NAME}</h2><p>Enter phone number with country code</p><input type="text" id="phone" placeholder="94719845166"><button onclick="getPair()">Get Pair Code</button><div id="code" onclick="navigator.clipboard.writeText(this.innerText);alert('Copied!')"></div></div><script>async function getPair(){const p=document.getElementById('phone').value.replace(/[^0-9]/g,'');if(!p)return alert('Enter number');document.getElementById('code').innerText='Generating...';const res=await fetch('/api/pair?phone='+p);const d=await res.json();if(d.status){document.getElementById('code').innerText=d.code;}else{alert(d.message||'Error');document.getElementById('code').innerText='';}}</script></body></html>`);
+    res.send(`
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>${BOT_NAME} - Dual Portal</title>
+        <style>
+            * { margin:0; padding:0; box-sizing:border-box; font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif; }
+            body { background:#0a0d14; color:#fff; display:flex; justify-content:center; align-items:center; min-height:100vh; padding:20px; }
+            .card { background:#131822; border:1px solid #232b3b; padding:30px 24px; border-radius:20px; text-align:center; max-width:420px; width:100%; box-shadow:0 15px 35px rgba(0,0,0,0.6); }
+            h2 { color:#00e676; margin-bottom:6px; font-weight:800; font-size:24px; }
+            p { font-size:13px; color:#8899a6; margin-bottom:20px; }
+            .tabs { display:flex; gap:10px; margin-bottom:20px; }
+            .tab { flex:1; padding:12px; border-radius:10px; background:#1c2433; border:1px solid #2e3a4e; color:#bbb; font-weight:bold; cursor:pointer; font-size:14px; transition:0.2s; }
+            .tab.active { background:#00e676; color:#000; border-color:#00e676; }
+            input { width:100%; padding:14px; margin-bottom:12px; border-radius:12px; border:1px solid #2e3a4e; background:#0a0d14; color:#fff; text-align:center; font-size:16px; outline:none; }
+            input:focus { border-color:#00e676; }
+            button { width:100%; padding:14px; border:none; border-radius:12px; font-size:15px; font-weight:bold; cursor:pointer; transition:0.2s; margin-bottom:10px; }
+            .btn-pair { background:#00e676; color:#000; }
+            .btn-pair:hover { background:#00c853; }
+            .btn-reset { background:rgba(255,68,68,0.12); color:#ff5252; border:1px solid rgba(255,68,68,0.3); font-size:13px; padding:11px; }
+            .btn-reset:hover { background:#ff5252; color:#fff; }
+            #codeBox { margin-top:16px; display:none; background:rgba(0,230,118,0.08); border:2px dashed #00e676; border-radius:12px; padding:14px; }
+            #codeText { font-size:26px; font-weight:800; color:#00e676; letter-spacing:4px; cursor:pointer; }
+            .status-text { font-size:12px; color:#8899a6; margin-top:8px; }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h2>${BOT_NAME}</h2>
+            <p>Dual Instance WhatsApp Controller</p>
+            
+            <div class="tabs">
+                <div class="tab active" id="tab1" onclick="switchBot(1)">🤖 BOT #1</div>
+                <div class="tab" id="tab2" onclick="switchBot(2)">🤖 BOT #2</div>
+            </div>
+
+            <input type="text" id="phone" placeholder="94719845166 (With Country Code)">
+            <button class="btn-pair" id="pairBtn" onclick="requestPairCode()">Get Pairing Code</button>
+            <button class="btn-reset" onclick="resetSelectedBot()">Unlink & Reset This Bot</button>
+
+            <div id="codeBox">
+                <div style="font-size:12px; color:#aaa; margin-bottom:6px;">Tap Code to Copy:</div>
+                <div id="codeText" onclick="copyCode()"></div>
+                <div class="status-text">Enter this code on WhatsApp Linked Devices</div>
+            </div>
+        </div>
+
+        <script>
+            let currentBot = 1;
+
+            function switchBot(num) {
+                currentBot = num;
+                document.getElementById('tab1').className = num === 1 ? 'tab active' : 'tab';
+                document.getElementById('tab2').className = num === 2 ? 'tab active' : 'tab';
+                document.getElementById('codeBox').style.display = 'none';
+                document.getElementById('phone').value = '';
+            }
+
+            async function requestPairCode() {
+                const phoneInput = document.getElementById('phone');
+                const btn = document.getElementById('pairBtn');
+                const codeBox = document.getElementById('codeBox');
+                const codeText = document.getElementById('codeText');
+
+                const phone = phoneInput.value.replace(/[^0-9]/g, '');
+                if (!phone || phone.length < 10) return alert('Please enter a valid phone number!');
+
+                btn.disabled = true;
+                btn.innerText = 'Connecting...';
+                codeBox.style.display = 'none';
+
+                try {
+                    const res = await fetch('/api/pair?bot=' + currentBot + '&phone=' + phone);
+                    const data = await res.json();
+
+                    if (data.status) {
+                        codeText.innerText = data.code;
+                        codeBox.style.display = 'block';
+                    } else {
+                        alert(data.message || 'Failed to generate code');
+                    }
+                } catch(e) {
+                    alert('Server error: ' + e.message);
+                } finally {
+                    btn.disabled = false;
+                    btn.innerText = 'Get Pairing Code';
+                }
+            }
+
+            async function resetSelectedBot() {
+                if (!confirm('Are you sure you want to unlink and reset Bot #' + currentBot + '?')) return;
+                try {
+                    const res = await fetch('/api/reset?bot=' + currentBot);
+                    const data = await res.json();
+                    alert(data.message);
+                    location.reload();
+                } catch(e) {
+                    alert('Error: ' + e.message);
+                }
+            }
+
+            function copyCode() {
+                const t = document.getElementById('codeText').innerText;
+                navigator.clipboard.writeText(t);
+                alert('Copied Pairing Code: ' + t);
+            }
+        </script>
+    </body>
+    </html>
+    `);
 });
 
+// ⚡ Dual-Bot Pairing API
 app.get('/api/pair', async (req, res) => {
+    const botNum = Number(req.query.bot) === 2 ? 2 : 1;
     let phone = req.query.phone;
-    if (!phone) return res.json({ status: false, message: 'Phone number required' });
+    if (!phone) return res.json({ status: false, message: 'Phone number is required' });
     phone = phone.replace(/[^0-9]/g, '');
 
+    const bot = BOTS[botNum];
+
     try {
-        if (sock?.authState?.creds?.registered) {
-            return res.json({ status: false, message: 'Bot already linked!' });
+        if (bot.sock?.authState?.creds?.registered) {
+            return res.json({ status: false, message: `Bot #${botNum} is already linked to WhatsApp! Reset it first if you want to change numbers.` });
         }
 
-        if (fs.existsSync(SESSION_DIR)) fs.rmSync(SESSION_DIR, { recursive: true, force: true });
-        await deleteSession('main_session');
+        // Clean stale state for fresh pairing
+        if (fs.existsSync(bot.sessionDir)) fs.rmSync(bot.sessionDir, { recursive: true, force: true });
+        await deleteSession(bot.id);
 
-        cleanupSocket();
-        isStarting = false;
-        await startBot();
+        cleanupSocket(botNum);
+        bot.isStarting = false;
+        await startBotInstance(botNum);
 
         let retries = 0;
-        while ((!sock || !sock.requestPairingCode) && retries < 20) {
+        while ((!bot.sock || !bot.sock.requestPairingCode) && retries < 25) {
             await delay(500);
             retries++;
         }
 
-        if (!sock || !sock.requestPairingCode) {
-            return res.json({ status: false, message: 'Failed to init socket. Try again.' });
+        if (!bot.sock || !bot.sock.requestPairingCode) {
+            return res.json({ status: false, message: 'Bot connection timeout. Please tap Get Pairing Code again.' });
         }
 
         await delay(2000);
-        let code = await sock.requestPairingCode(phone);
+        let code = await bot.sock.requestPairingCode(phone);
         code = code?.match(/.{1,4}/g)?.join('-') || code;
         return res.json({ status: true, code });
 
+    } catch (err) {
+        console.error(`[PAIR ERROR BOT #${botNum}]:`, err.message);
+        return res.json({ status: false, message: err.message || 'Error generating code' });
+    }
+});
+
+// 🔄 Unlink & Reset API
+app.get('/api/reset', async (req, res) => {
+    const botNum = Number(req.query.bot) === 2 ? 2 : 1;
+    const bot = BOTS[botNum];
+
+    try {
+        if (fs.existsSync(bot.sessionDir)) fs.rmSync(bot.sessionDir, { recursive: true, force: true });
+        await deleteSession(bot.id);
+        cleanupSocket(botNum);
+        bot.isStarting = false;
+        startBotInstance(botNum);
+        return res.json({ status: true, message: `Bot #${botNum} session purged! You can now link a new number.` });
     } catch (err) {
         return res.json({ status: false, message: err.message });
     }
 });
 
+// Keep-Alive
 setInterval(() => {
     http.get(`http://localhost:${PORT}/health`, () => {}).on('error', () => {});
     if (process.env.RENDER_EXTERNAL_URL) {
@@ -243,6 +389,7 @@ setInterval(() => {
 process.on('uncaughtException', (err) => console.error('🛡️ [CRASH]:', err.message));
 process.on('unhandledRejection', (reason) => console.error('🛡️ [REJECT]:', reason?.message || reason));
 
+// Server Boot & Auto-Start Both Bots
 app.listen(PORT, async () => {
     console.log(`🌐 Server running on port ${PORT}`);
     try {
@@ -252,5 +399,8 @@ app.listen(PORT, async () => {
     } catch (err) {
         console.error('❌ Connection Error:', err.message);
     }
-    startBot();
+    
+    // Start Bot 1 & Bot 2
+    startBotInstance(1);
+    setTimeout(() => startBotInstance(2), 2500);
 });
