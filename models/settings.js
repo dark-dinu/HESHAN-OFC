@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 
-const defaultSettings = {
+const defaultSettings = Object.freeze({
     autoSeen: false,
     autoReact: false,
     autoSave: false,
@@ -12,8 +12,8 @@ const defaultSettings = {
     antiSendDest: 'me', // 'me' (Private Inbox) හෝ 'from' (Current Chat)
     alwaysOnline: false,
     antiCall: true,
-    autoRead: false // ⚡ Auto Read (Chat Messages)
-};
+    autoRead: false     // ⚡ Auto Read (Chat Messages Blue Tick)
+});
 
 const settingsSchema = new mongoose.Schema({
     key: { type: String, required: true, unique: true },
@@ -28,12 +28,12 @@ const settingsSchema = new mongoose.Schema({
     antiSendDest: { type: String, default: 'me' },
     alwaysOnline: { type: Boolean, default: false },
     antiCall: { type: Boolean, default: true },
-    autoRead: { type: Boolean, default: false } // ⚡ Auto Read DB Field
+    autoRead: { type: Boolean, default: false }
 }, { timestamps: true });
 
 const Settings = mongoose.models.Settings || mongoose.model('Settings', settingsSchema);
 
-// Memory RAM Cache (Instant Access for Handlers)
+// ⚡ In-Memory Fast Cache (Handlers වෙත Zero Delay Access)
 global.botSettings = { ...defaultSettings };
 
 async function loadSettings() {
@@ -44,9 +44,9 @@ async function loadSettings() {
             current = current.toObject();
         }
         global.botSettings = { ...defaultSettings, ...current };
-        console.log('⚙️ Bot Settings Loaded from MongoDB.');
+        console.log('⚙️ Bot Settings Loaded & Synchronized.');
     } catch (err) {
-        console.error('Failed to load settings from DB, using defaults:', err.message);
+        console.error('Failed to load settings, using defaults:', err.message);
         global.botSettings = { ...defaultSettings };
     }
 }
@@ -64,4 +64,22 @@ async function updateSetting(field, value) {
     }
 }
 
-module.exports = { Settings, loadSettings, updateSetting };
+// 🧹 Factory Reset වූ විට Settings මුල සිට යළි සකසන ශ්‍රිතය
+async function resetSettingsToDefault() {
+    global.botSettings = { ...defaultSettings };
+    try {
+        await Settings.deleteMany({});
+        await Settings.create({ key: 'main_settings', ...defaultSettings });
+        console.log('⚙️ Settings restored to factory defaults.');
+    } catch (err) {
+        console.error('Failed to reset settings:', err.message);
+    }
+}
+
+module.exports = { 
+    Settings, 
+    loadSettings, 
+    updateSetting, 
+    resetSettingsToDefault,
+    defaultSettings 
+};
