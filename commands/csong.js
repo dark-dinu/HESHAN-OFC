@@ -1,48 +1,26 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const https = require('https');
-const http = require('http');
 const { exec } = require('child_process');
+const axios = require('axios');
+const ytSearch = require('yt-search');
 
-// 🔑 Chamindu Official API Key
 const API_KEY = process.env.CHAMINDU_API_KEY || 'chama_api_ec9848130d1aea209f08fb85e0b4720f';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-// ── Native JSON Fetcher (Axios නැතත් වැඩ කරයි) ──
-function fetchJson(url) {
-    return new Promise((resolve) => {
-        const client = url.startsWith('https') ? https : http;
-        const req = client.get(url, { headers: { 'User-Agent': UA } }, (res) => {
-            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                return fetchJson(res.headers.location).then(resolve);
-            }
-            let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => {
-                try { resolve(JSON.parse(data)); } catch (e) { resolve(null); }
-            });
+// ── Native Buffer Downloader with 15MB Safety Cap ──
+async function downloadBuffer(url) {
+    try {
+        const res = await axios.get(url, {
+            responseType: 'arraybuffer',
+            headers: { 'User-Agent': UA },
+            timeout: 30000,
+            maxContentLength: 15 * 1024 * 1024 // 15MB Max
         });
-        req.on('error', () => resolve(null));
-        req.setTimeout(25000, () => { req.destroy(); resolve(null); });
-    });
-}
-
-// ── Native Buffer Downloader ──
-function downloadBuffer(url) {
-    return new Promise((resolve) => {
-        const client = url.startsWith('https') ? https : http;
-        const req = client.get(url, { headers: { 'User-Agent': UA } }, (res) => {
-            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                return downloadBuffer(res.headers.location).then(resolve);
-            }
-            const chunks = [];
-            res.on('data', chunk => chunks.push(chunk));
-            res.on('end', () => resolve(Buffer.concat(chunks)));
-        });
-        req.on('error', () => resolve(null));
-        req.setTimeout(60000, () => { req.destroy(); resolve(null); });
-    });
+        return Buffer.from(res.data);
+    } catch {
+        return null;
+    }
 }
 
 // ── FFmpeg WhatsApp Voice Note (OGG Opus) Converter ──
@@ -55,7 +33,7 @@ function convertToWhatsAppVoice(inputBuffer) {
             ffmpegBinary = 'ffmpeg';
         }
 
-        const tempId = Date.now() + '_' + Math.random().toString(36).substring(7);
+        const tempId = `${Date.now()}_${Math.random().toString(36).substring(7)}`;
         const tempInput = path.join(os.tmpdir(), `in_${tempId}.mp3`);
         const tempOutput = path.join(os.tmpdir(), `out_${tempId}.opus`);
 
@@ -75,55 +53,30 @@ function convertToWhatsAppVoice(inputBuffer) {
                     } catch (e) {}
                 }
 
-                // FFmpeg නැතිනම් raw buffer එකෙන් වැඩ කරයි (Crash වෙන්නේ නෑ)
+                // Fallback to raw buffer
                 resolve({ buffer: inputBuffer, isOpus: false });
             });
         });
     });
 }
 
-// ── Fast YouTube Search Scraper ──
-function searchYouTube(query) {
-    return new Promise((resolve) => {
-        const isUrl = /(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com|youtu\.be)/i.test(query);
-        const searchUrl = isUrl ? query : `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+// ── Ultra-Fast YouTube Search Engine ──
+async function searchYouTube(query) {
+    try {
+        const res = await ytSearch(query);
+        if (!res || !res.videos || res.videos.length === 0) return null;
 
-        https.get(searchUrl, {
-            headers: {
-                'User-Agent': UA,
-                'Accept-Language': 'en-US,en;q=0.9'
-            }
-        }, (res) => {
-            let html = '';
-            res.on('data', chunk => html += chunk);
-            res.on('end', () => {
-                try {
-                    const jsonMatch = html.match(/ytInitialData\s*=\s*({.+?});<\/script>/);
-                    if (!jsonMatch) return resolve(null);
-
-                    const data = JSON.parse(jsonMatch[1]);
-                    const contents = data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents[0]?.itemSectionRenderer?.contents;
-                    if (!contents) return resolve(null);
-
-                    for (const item of contents) {
-                        const vr = item.videoRenderer;
-                        if (vr && vr.videoId) {
-                            return resolve({
-                                videoId: vr.videoId,
-                                url: `https://www.youtube.com/watch?v=${vr.videoId}`,
-                                title: vr.title?.runs?.[0]?.text || 'Channel Song',
-                                duration: vr.lengthText?.simpleText || '3:30',
-                                thumbnail: `https://i.ytimg.com/vi/${vr.videoId}/hqdefault.jpg`
-                            });
-                        }
-                    }
-                    resolve(null);
-                } catch {
-                    resolve(null);
-                }
-            });
-        }).on('error', () => resolve(null));
-    });
+        const video = res.videos[0];
+        return {
+            videoId: video.videoId,
+            url: video.url,
+            title: video.title || 'Channel Song',
+            duration: video.timestamp || '3:30',
+            thumbnail: video.thumbnail || `https://i.ytimg.com/vi/${video.videoId}/hqdefault.jpg`
+        };
+    } catch {
+        return null;
+    }
 }
 
 // ── Chamindu API Stream Link Resolver ──
@@ -136,12 +89,15 @@ async function getAudioDownloadUrl(videoUrl) {
     ];
 
     for (const ep of endpoints) {
-        const res = await fetchJson(ep);
-        if (res) {
-            const link = res.data?.direct_url || res.data?.download_url || res.data?.download_link 
-                      || res.direct_url || res.download_url || res.download_link;
-            if (typeof link === 'string' && /^https?:\/\//i.test(link)) return link;
-        }
+        try {
+            const res = await axios.get(ep, { headers: { 'User-Agent': UA }, timeout: 12000 });
+            const data = res.data;
+            if (data) {
+                const link = data.data?.direct_url || data.data?.download_url || data.data?.download_link 
+                          || data.direct_url || data.download_url || data.download_link;
+                if (typeof link === 'string' && /^https?:\/\//i.test(link)) return link;
+            }
+        } catch {}
     }
     return null;
 }
@@ -150,25 +106,27 @@ module.exports = {
     name: 'csong',
     aliases: ['channelsong', 'cvoice', 'cplay'],
     execute: async (sock, msg, args, isDev, BOT_NAME, cleanSender) => {
-        const from = msg.key.remoteJid;
+        const from = msg.key?.remoteJid;
+        if (!from) return;
+
         const botName = BOT_NAME || '𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂';
         const fullText = (args || []).join(' ').trim();
         const react = (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } }).catch(() => {});
 
         if (!fullText) {
             return sock.sendMessage(from, {
-                text: `⚠️ *භාවිතය:*\n*.csong <channel_link> , <song_name>*\n\n*උදාහරණ:*\n.csong https://whatsapp.com/channel/0029VbAQYhXDZ4Lfo9K5gh1V , sadawathiye`
+                text: `⚠️ *Usage:*\n*.csong <channel_link> , <song_name>*\n\n*Example:*\n.csong https://whatsapp.com/channel/0029VbAQYhXDZ4Lfo9K5gh1V , sadawathiye`
             }, { quoted: msg });
         }
 
-        // Link සහ සින්දුවේ නම වෙන් කිරීම
-        const linkMatch = fullText.match(/https?:\/\/(?:www\.)?whatsapp\.com\/channel\/[^\s,]+/i);
+        // Link සහ సින්දුවේ නම වෙන් කිරීම (Post ID /392 වැනි දෑ සම්පූර්ණයෙන්ම හසුරුවයි)
+        const linkMatch = fullText.match(/https?:\/\/(?:www\.)?whatsapp\.com\/channel\/[a-zA-Z0-9_\-\/]+/i);
         let channelLink = '';
         let songName = '';
 
         if (linkMatch) {
             channelLink = linkMatch[0];
-            songName = fullText.replace(linkMatch[0], '').replace(/^[\s,]+|[\s,]+$/g, '').trim();
+            songName = fullText.replace(channelLink, '').replace(/^[\s,]+|[\s,]+$/g, '').trim();
         } else {
             return sock.sendMessage(from, {
                 text: `⚠️ කරුණාකර Channel Link එක සහ සින්දුවේ නම කොමාවකින් (,) වෙන් කර ලබාදෙන්න!`
@@ -176,10 +134,10 @@ module.exports = {
         }
 
         if (!songName) {
-            return sock.sendMessage(from, { text: '⚠️ සින්දුවේ නම ලබාදෙන්න!' }, { quoted: msg });
+            return sock.sendMessage(from, { text: '⚠️ කරුණාකර සින්දුවේ නම ලබාදෙන්න!' }, { quoted: msg });
         }
 
-        // /392 වැනි post IDs ඉවත් කර Invite Code එක පමණක් ගැනීම[span_0](start_span)[span_0](end_span)[span_1](start_span)[span_1](end_span)
+        // Invite code එක පිරිසිදුව ලබා ගැනීම
         const inviteCode = channelLink.split('whatsapp.com/channel/')[1]?.split(/[\/?#]/)[0]?.trim();
         if (!inviteCode) {
             return sock.sendMessage(from, { text: '❌ වලංගු WhatsApp Channel Link එකක් ලබාදෙන්න!' }, { quoted: msg });
@@ -202,6 +160,10 @@ module.exports = {
                 return sock.sendMessage(from, { text: '❌ Channel එක සොයාගත නොහැකි විය. Link එක පරීක්ෂා කරන්න.' }, { quoted: msg });
             }
 
+            if (!channelJid.includes('@')) {
+                channelJid = `${channelJid}@newsletter`;
+            }
+
             // 2. YouTube Search
             const video = await searchYouTube(songName);
             if (!video) {
@@ -209,11 +171,11 @@ module.exports = {
                 return sock.sendMessage(from, { text: '❌ සින්දුව සොයාගත නොහැකි විය.' }, { quoted: msg });
             }
 
-            // 3. Audio Download Stream ලබා ගැනීම
+            // 3. Audio Stream Link එක ලබා ගැනීම
             const audioUrl = await getAudioDownloadUrl(video.url);
             if (!audioUrl) {
                 react('❌');
-                return sock.sendMessage(from, { text: '❌ Audio Download link එක ලබාගැනීමට නොහැකි විය.' }, { quoted: msg });
+                return sock.sendMessage(from, { text: '❌ Audio Download stream එක ලබාගැනීමට නොහැකි විය.' }, { quoted: msg });
             }
 
             const rawBuffer = await downloadBuffer(audioUrl);
@@ -225,9 +187,7 @@ module.exports = {
             // 4. Voice Note බවට Convert කිරීම
             const voice = await convertToWhatsAppVoice(rawBuffer);
 
-            // 5. Thumbnail Card එක සකස් කිරීම
-            const thumbBuffer = await downloadBuffer(video.thumbnail);
-
+            // 5. Card Caption
             const cardCaption = 
 `🥰⃝🎶 *“ ${video.title} ”*
 
@@ -237,14 +197,17 @@ Use Headphones For Best Experience.... 🧚‍♀️🎵
 
 | ☘️ *${botName}*`;
 
-            // 6. Channel එකට Card එක යැවීම
-            if (thumbBuffer && thumbBuffer.length > 1000) {
-                await sock.sendMessage(channelJid, { image: thumbBuffer, caption: cardCaption });
+            // 6. Channel එකට Thumbnail Card එක යැවීම
+            if (video.thumbnail) {
+                await sock.sendMessage(channelJid, { 
+                    image: { url: video.thumbnail }, 
+                    caption: cardCaption 
+                });
             } else {
                 await sock.sendMessage(channelJid, { text: cardCaption });
             }
 
-            // 7. Channel එකට Original Voice Note එක යැවීම
+            // 7. Channel එකට Voice Note එක යැවීම
             await sock.sendMessage(channelJid, {
                 audio: voice.buffer,
                 mimetype: voice.isOpus ? 'audio/ogg; codecs=opus' : 'audio/mp4',
@@ -257,9 +220,9 @@ Use Headphones For Best Experience.... 🧚‍♀️🎵
             }, { quoted: msg });
 
         } catch (err) {
-            console.error('[CSONG MAIN ERROR]:', err);
+            console.error('[CSONG MAIN ERROR]:', err.message);
             react('❌');
-            return sock.sendMessage(from, { text: `❌ Error: ${err.message || 'Failed to post'}` }, { quoted: msg });
+            return sock.sendMessage(from, { text: `❌ Error: ${err.message || 'Failed to post to channel'}` }, { quoted: msg });
         }
     }
 };
