@@ -11,7 +11,8 @@ const defaultSettings = {
     antiViewOnce: true,
     antiSendDest: 'me', // 'me' (Private Inbox) හෝ 'from' (Current Chat)
     alwaysOnline: false,
-    antiCall: true
+    antiCall: true,
+    autoRead: false // ⚡ Auto Read (Chat Messages)
 };
 
 const settingsSchema = new mongoose.Schema({
@@ -26,7 +27,8 @@ const settingsSchema = new mongoose.Schema({
     antiViewOnce: { type: Boolean, default: true },
     antiSendDest: { type: String, default: 'me' },
     alwaysOnline: { type: Boolean, default: false },
-    antiCall: { type: Boolean, default: true }
+    antiCall: { type: Boolean, default: true },
+    autoRead: { type: Boolean, default: false } // ⚡ Auto Read DB Field
 }, { timestamps: true });
 
 const Settings = mongoose.models.Settings || mongoose.model('Settings', settingsSchema);
