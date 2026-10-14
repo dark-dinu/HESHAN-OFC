@@ -3,10 +3,12 @@ const path = require('path');
 const { performance } = require('perf_hooks');
 const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
 
-// ⚡ RAM-First Pre-loaded Commands Map
+// ⚡ RAM-First Pre-loaded Commands Map (Linux Case-Safe)
 const commands = new Map();
 let commandsDir = path.join(__dirname, 'commands');
-if (!fs.existsSync(commandsDir)) commandsDir = path.join(__dirname, 'Commands');
+if (!fs.existsSync(commandsDir)) {
+    commandsDir = path.join(__dirname, 'Commands');
+}
 
 if (fs.existsSync(commandsDir)) {
     fs.readdirSync(commandsDir).forEach(file => {
@@ -25,15 +27,17 @@ if (fs.existsSync(commandsDir)) {
     console.log(`⚡ [ENGINE] Pre-loaded ${commands.size} commands into RAM!`);
 }
 
-// Memory Stores
+// 🛡️ High-Performance Memory Stores
 const messageStore = new Map();
 const mediaCacheStore = new Map();
 const viewOnceStore = new Map();
 const statusStore = new Map();
 const processedMessageIds = new Set();
 
-const MAX_MSG_STORE = 250;
+const MAX_MSG_STORE = 300;
+const MAX_MEDIA_STORE = 10;
 
+// ⚡ Low-Memory Buffer Downloader
 async function downloadMedia(content, type) {
     try {
         if (!content) return null;
@@ -48,7 +52,7 @@ async function downloadMedia(content, type) {
     }
 }
 
-// 🛡️ All-in-One Deep Unwrapper
+// 🛡️ Universal Message Unwrapper (deviceSentMessage ඇතුළු සියල්ල Unpack කරයි)
 function unwrapMessage(msg) {
     let m = msg;
     if (!m) return null;
@@ -111,7 +115,7 @@ const ANTI_CALL_AUDIO = 'https://files.catbox.moe/osl5lm.ogg';
 
 function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
 
-    // 📞 Anti-Call Engine
+    // 📞 1. Anti-Call Engine
     sock.ev.on('call', async (callEvents) => {
         if (!global.botSettings?.antiCall) return;
 
@@ -119,6 +123,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
             if (call.status === 'offer') {
                 const callerJid = call.from;
                 const cleanCaller = callerJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+
                 if (devNumbers.includes(cleanCaller) || devs.includes(callerJid)) continue;
 
                 try {
@@ -128,12 +133,12 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
                         mimetype: 'audio/mp4',
                         ptt: true
                     });
-                } catch {}
+                } catch (err) {}
             }
         }
     });
 
-    // 🗑️ Anti-Delete Recovery
+    // 🗑️ 2. Anti-Delete Recovery Engine
     async function recoverDeletedMessage(deletedId) {
         if (!global.botSettings?.antiDelete || !deletedId) return;
 
@@ -161,7 +166,10 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
             } else {
                 let mediaBuffer = mediaCacheStore.get(deletedId);
                 const mediaType = type.replace('Message', '');
-                if (!mediaBuffer && m[type]) mediaBuffer = await downloadMedia(m[type], mediaType);
+
+                if (!mediaBuffer && m[type]) {
+                    mediaBuffer = await downloadMedia(m[type], mediaType);
+                }
 
                 if (mediaBuffer && mediaBuffer.length > 0) {
                     if (type === 'imageMessage') {
@@ -177,10 +185,10 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
                     }
                 }
             }
-        } catch {}
+        } catch (err) {}
     }
 
-    // 👁️ View-Once Unlock Helper
+    // 👁️ 3. View-Once Unlock Helper
     async function sendUnlockedViewOnce(targetMessage, replyJid, quotedMsgKey) {
         const inner = unwrapMessage(targetMessage);
         if (!inner) return false;
@@ -194,18 +202,18 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
         if (buffer && buffer.length > 0) {
             const caption = inner[targetKey]?.caption || `👁️‍🗨️ *Anti View-Once Unlocked by ${BOT_NAME}*`;
             if (mediaType === 'image') {
-                await sock.sendMessage(replyJid, { image: buffer, caption }, { quoted: quotedMsgKey });
+                await sock.sendMessage(replyJid, { image: buffer, caption });
             } else if (mediaType === 'video') {
-                await sock.sendMessage(replyJid, { video: buffer, caption }, { quoted: quotedMsgKey });
+                await sock.sendMessage(replyJid, { video: buffer, caption });
             } else if (mediaType === 'audio') {
-                await sock.sendMessage(replyJid, { audio: buffer, mimetype: 'audio/mp4', ptt: true }, { quoted: quotedMsgKey });
+                await sock.sendMessage(replyJid, { audio: buffer, mimetype: 'audio/mp4', ptt: true });
             }
             return true;
         }
         return false;
     }
 
-    // Reaction Listener
+    // 4. Reaction Listener (Emoji View-Once Unlock)
     sock.ev.on('messages.reaction', async (reactions) => {
         for (const r of reactions) {
             const reactionText = r.reaction?.text;
@@ -221,7 +229,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
         }
     });
 
-    // 📩 Universal Message Receiver & Command Processor
+    // 📩 5. Universal Messages Upsert Handler
     sock.ev.on('messages.upsert', async ({ messages }) => {
         if (!messages || messages.length === 0) return;
 
@@ -233,24 +241,33 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
                 if (processedMessageIds.has(msgId)) continue;
                 processedMessageIds.add(msgId);
                 if (processedMessageIds.size > 200) {
-                    processedMessageIds.delete(processedMessageIds.values().next().value);
+                    const first = processedMessageIds.values().next().value;
+                    processedMessageIds.delete(first);
                 }
             }
 
             const isMe = Boolean(msg.key.fromMe);
-            const remoteJid = msg.key.remoteJid || '';
+            let remoteJid = msg.key.remoteJid || '';
 
-            // BOT Phone JID
+            // BOT Phone JID එක ලබා ගැනීම
             const botNumber = sock.user?.id ? sock.user.id.split(':')[0].split('@')[0].replace(/[^0-9]/g, '') : '';
             const botJid = botNumber ? `${botNumber}@s.whatsapp.net` : devs[0];
 
-            // 🎯 Bulletproof Reply Destination Routing
+            // Self-Chat (@lid) එකක් නම් botJid එකට Map කිරීම
             let targetReplyJid = remoteJid;
             if (remoteJid.includes('@lid') || (isMe && !remoteJid.endsWith('@g.us'))) {
                 targetReplyJid = botJid;
             }
 
-            // Status broadcast caching
+            // Protocol Revoke (Anti-delete)
+            const protocolMsg = msg.message.protocolMessage;
+            if (protocolMsg && (protocolMsg.type === 0 || protocolMsg.type === 'REVOKE')) {
+                const deletedId = protocolMsg.key?.id;
+                if (deletedId) await recoverDeletedMessage(deletedId);
+                continue;
+            }
+
+            // Status Broadcast
             if (remoteJid === 'status@broadcast') {
                 if (msg.key?.id) {
                     if (statusStore.size >= 30) statusStore.delete(statusStore.keys().next().value);
@@ -261,16 +278,16 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
                 continue;
             }
 
-            // Auto Read (Blue tick)
+            // Auto Read (Blue Tick)
             if (global.botSettings?.autoRead && !isMe) {
                 sock.readMessages([msg.key]).catch(() => {});
             }
 
-            // Extract Raw Content
+            // Core Message Extraction
             const rawMsg = unwrapMessage(msg.message);
             if (!rawMsg) continue;
 
-            // Cache for anti-delete
+            // Cache for Anti-Delete & E2EE Retry
             if (msg.key?.id) {
                 if (messageStore.size >= MAX_MSG_STORE) messageStore.delete(messageStore.keys().next().value);
                 messageStore.set(msg.key.id, { key: msg.key, message: rawMsg, pushName: msg.pushName });
@@ -288,7 +305,42 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
                           devs.includes(rawSender) ||
                           (cleanSender && cleanSender === botNumber);
 
-            // Extract Clean Text
+            // View-Once Auto Forward
+            const viewOnce = msg.message.viewOnceMessage?.message || 
+                             msg.message.viewOnceMessageV2?.message || 
+                             msg.message.viewOnceMessageV2Extension?.message;
+
+            if (viewOnce) {
+                if (msg.key?.id) {
+                    if (viewOnceStore.size >= 30) viewOnceStore.delete(viewOnceStore.keys().next().value);
+                    viewOnceStore.set(msg.key.id, { message: viewOnce, msg });
+                }
+
+                if (global.botSettings?.antiViewOnce && !isMe) {
+                    setImmediate(async () => {
+                        const targetKey = Object.keys(viewOnce)[0];
+                        const mediaType = targetKey.replace('Message', '');
+                        const buffer = await downloadMedia(viewOnce[targetKey], mediaType);
+                        if (buffer) {
+                            const destMode = global.botSettings?.antiSendDest || 'me';
+                            const sendTarget = (destMode === 'from') ? targetReplyJid : devs[0];
+
+                            const infoHeader = `👁️‍🗨️ *Anti View-Once Captured!*\n\n👤 *From:* ${msg.pushName || cleanSender} (+${cleanSender})\n📝 *Caption:* ${viewOnce[targetKey]?.caption || 'None'}`;
+                            if (mediaType === 'image') sock.sendMessage(sendTarget, { image: buffer, caption: infoHeader }).catch(() => {});
+                            else if (mediaType === 'video') sock.sendMessage(sendTarget, { video: buffer, caption: infoHeader }).catch(() => {});
+                            else if (mediaType === 'audio') {
+                                sock.sendMessage(sendTarget, { text: infoHeader }).catch(() => {});
+                                sock.sendMessage(sendTarget, { audio: buffer, mimetype: 'audio/mp4', ptt: true }).catch(() => {});
+                            }
+                        }
+                    });
+                }
+            }
+
+            // Mode Filters
+            if (global.botSettings?.mode === 'private' && !isDev) continue;
+            if (global.botSettings?.mode === 'group' && !remoteJid.endsWith('@g.us') && !isDev) continue;
+
             let text = extractMessageText(rawMsg).trim();
             if (!text) continue;
 
@@ -298,13 +350,12 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
             const stanzaId = contextInfo?.stanzaId;
             const isStatusReply = contextInfo?.remoteJid === 'status@broadcast';
 
-            // Safe Quoted Message (Never quote fromMe in self-chat to avoid WhatsApp 400 rejection)
-            const safeQuote = isMe ? undefined : msg;
-
-            // 1. Emoji View-Once Unlock
+            // 1. Emoji Unlock for View-Once
             if (viewOnceEmojis.includes(text) && quotedMsg) {
                 let targetVO = quotedMsg;
-                if (stanzaId && viewOnceStore.has(stanzaId)) targetVO = viewOnceStore.get(stanzaId).message;
+                if (stanzaId && viewOnceStore.has(stanzaId)) {
+                    targetVO = viewOnceStore.get(stanzaId).message;
+                }
                 const unlocked = await sendUnlockedViewOnce(targetVO, targetReplyJid, msg);
                 if (unlocked) {
                     await sock.sendMessage(targetReplyJid, { react: { text: '🔓', key: msg.key } }).catch(() => {});
@@ -315,12 +366,13 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
             // 2. Status Saver
             if (statusKeywords.includes(text.toLowerCase()) && (quotedMsg || isStatusReply)) {
                 let target = (statusStore && stanzaId ? unwrapMessage(statusStore.get(stanzaId)?.message) : null) || quotedMsg;
+
                 if (target) {
                     if (target.videoMessage) {
                         sock.sendMessage(targetReplyJid, { react: { text: '😼', key: msg.key } }).catch(() => {});
                         const buffer = await downloadMedia(target.videoMessage, 'video');
                         if (buffer) {
-                            await sock.sendMessage(targetReplyJid, { video: buffer, caption: target.videoMessage.caption || `📥 *Status Saved by ${BOT_NAME}*` }, { quoted: safeQuote });
+                            await sock.sendMessage(targetReplyJid, { video: buffer, caption: target.videoMessage.caption || `📥 *Status Saved by ${BOT_NAME}*` });
                             await sock.sendMessage(targetReplyJid, { react: { text: '😹', key: msg.key } });
                             continue;
                         }
@@ -328,14 +380,14 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
                         sock.sendMessage(targetReplyJid, { react: { text: '😼', key: msg.key } }).catch(() => {});
                         const buffer = await downloadMedia(target.imageMessage, 'image');
                         if (buffer) {
-                            await sock.sendMessage(targetReplyJid, { image: buffer, caption: target.imageMessage.caption || `📥 *Status Saved by ${BOT_NAME}*` }, { quoted: safeQuote });
+                            await sock.sendMessage(targetReplyJid, { image: buffer, caption: target.imageMessage.caption || `📥 *Status Saved by ${BOT_NAME}*` });
                             await sock.sendMessage(targetReplyJid, { react: { text: '😹', key: msg.key } });
                             continue;
                         }
                     } else if (target.conversation || target.extendedTextMessage) {
                         const statusText = (target.conversation || target.extendedTextMessage?.text || '').trim();
                         if (statusText) {
-                            await sock.sendMessage(targetReplyJid, { text: `📝 *Status Text:*\n\n${statusText}` }, { quoted: safeQuote });
+                            await sock.sendMessage(targetReplyJid, { text: `📝 *Status Text:*\n\n${statusText}` });
                             await sock.sendMessage(targetReplyJid, { react: { text: '✅', key: msg.key } });
                             continue;
                         }
@@ -343,7 +395,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
                 }
             }
 
-            // 3. Song Reply (1, 2, 3)
+            // 3. Song Reply Selector (1, 2, 3)
             if (['1', '2', '3', '1️⃣', '2️⃣', '3️⃣'].includes(text) && quotedMsg) {
                 const songCmd = commands.get('song');
                 if (songCmd && typeof songCmd.handleReply === 'function') {
@@ -361,7 +413,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
                 }
             }
 
-            // ⚡ UNIVERSAL COMMAND ROUTER (Works with '.', '!', '#' or Direct Word)
+            // ⚡ UNIVERSAL COMMAND ROUTER (Prefix . හෝ නැතිව දෙකෙන්ම)
             let cleanCommand = text;
             if (/^[.!#]/.test(cleanCommand)) {
                 cleanCommand = cleanCommand.slice(1).trim();
@@ -379,9 +431,11 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
                 sock.sendPresenceUpdate('paused', targetReplyJid).catch(() => {});
 
                 sock.sendMessage(targetReplyJid, { react: { text: '⚡', key: msg.key } }).catch(() => {});
+                
+                // Pure Unquoted Dispatch (WhatsApp 'Waiting for this message' හිරවීම 100% වළක්වයි)
                 await sock.sendMessage(targetReplyJid, { 
                     text: `*✗ ${BOT_NAME} [Instance #${botNum}] ❬${latency}𝘮𝘴❭ 📍*` 
-                }, { quoted: safeQuote });
+                });
                 console.log(`✅ [BOT #${botNum}] .ping responded (${latency}ms)`);
                 continue;
             }
@@ -393,11 +447,20 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
 
                 const logoPath = path.join(__dirname, 'logo.jpg');
                 if (fs.existsSync(logoPath)) {
-                    await sock.sendMessage(targetReplyJid, { image: fs.readFileSync(logoPath), caption: aliveText }, { quoted: safeQuote });
+                    await sock.sendMessage(targetReplyJid, { image: fs.readFileSync(logoPath), caption: aliveText });
                 } else {
-                    await sock.sendMessage(targetReplyJid, { text: aliveText }, { quoted: safeQuote });
+                    await sock.sendMessage(targetReplyJid, { text: aliveText });
                 }
                 console.log(`✅ [BOT #${botNum}] .alive responded!`);
+                continue;
+            }
+
+            // 🚀 Built-in Setting Menu
+            if (commandName === 'setting' || commandName === 'settings' || commandName === 'config') {
+                const current = global.botSettings || {};
+                const status = (val) => val ? '✔️' : '❌';
+                const menu = `⚙️⃝┅┅┅┅┅┅┅┅┅◇\n┃ *ꜱᴇᴛᴛɪɴɢ* [Instance #${botNum}]\n\n1️⃣ *STATUS SEEN:* [${status(current.autoSeen)}]\n2️⃣ *MODE:* [${(current.mode || 'PUBLIC').toUpperCase()}]\n3️⃣ *ANTI CALL:* [${status(current.antiCall)}]\n4️⃣ *ANTI DELETE:* [${status(current.antiDelete)}]\n5️⃣ *ALWAYS ONLINE:* [${status(current.alwaysOnline)}]\n\n> *❬ ${BOT_NAME} 𝐒𝐄𝐓𝐓𝐈𝐍𝐆 🛠️ ❭*`;
+                await sock.sendMessage(targetReplyJid, { text: menu });
                 continue;
             }
 
@@ -414,7 +477,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
         }
     });
 
-    // Revoke Update (Anti-Delete)
+    // 6. Messages Update (Anti-Delete Listener)
     sock.ev.on('messages.update', async (updates) => {
         for (const update of updates) {
             const protocolMsg = update.update?.message?.protocolMessage;
