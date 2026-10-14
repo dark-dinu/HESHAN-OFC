@@ -17,11 +17,21 @@ module.exports = {
     name: 'alive',
     aliases: ['bot', 'info'],
     execute: async (sock, msg, args, isDev, BOT_NAME) => {
-        const chatJid = msg.key?.remoteJid;
+        const isMe = Boolean(msg.key?.fromMe);
+        let chatJid = msg.key?.remoteJid;
         if (!chatJid) return;
 
+        // 🛡️ 1. LID & Self-Chat Auto-Routing (LID එක Phone JID එකට හරවයි)
+        if (chatJid.includes('@lid') || (isMe && !chatJid.endsWith('@g.us'))) {
+            const myNumber = sock.user?.id ? sock.user.id.split(':')[0].split('@')[0].replace(/[^0-9]/g, '') : '';
+            if (myNumber) chatJid = `${myNumber}@s.whatsapp.net`;
+        }
+
+        // 🛡️ 2. Safe Quoted Guard (තමන්ගේම මැසේජ් quote කර WhatsApp 400 Error ඒම වළක්වයි)
+        const quoteOption = isMe ? undefined : { quoted: msg };
+
         try {
-            // 1. Non-blocking Reaction
+            // Reaction එක Non-blocking ලෙස යැවීම
             sock.sendMessage(chatJid, { react: { text: '👤', key: msg.key } }).catch(() => {});
 
             // Alive Card Template
@@ -37,16 +47,16 @@ module.exports = {
 
 *© ${BOT_NAME} 2026 𝐔𝐏𝐃𝐀𝐓𝐄 ❄️*`;
 
-            // 2. Ultra-Fast Zero-Lag Dispatch
+            // Ultra-Fast Zero-Lag Dispatch
             if (cachedLogo && cachedLogo.length > 0) {
                 await sock.sendMessage(chatJid, { 
                     image: cachedLogo, 
                     caption: aliveText 
-                }, { quoted: msg });
+                }, quoteOption);
             } else {
                 await sock.sendMessage(chatJid, { 
                     text: aliveText 
-                }, { quoted: msg });
+                }, quoteOption);
             }
 
         } catch (err) {
