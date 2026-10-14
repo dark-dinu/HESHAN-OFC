@@ -83,6 +83,7 @@ const viewOnceEmojis = [
     '💔', '🫡', '👍', '🤣', '😏', '😌', '👎', '🙈', '🙏', '🤝'
 ];
 
+// ⚡ 10.1 සහ 10.2 Shortcuts සහිත වලංගු අංක ලැයිස්තුව
 const validSettingNumbers = [
     '1.1', '1.2', '1.3', '1.4', '1.5', '1.6',
     '2.1', '2.2', '2.3',
@@ -92,7 +93,8 @@ const validSettingNumbers = [
     '6.1', '6.2',
     '7.1', '7.2',
     '8.1', '8.2',
-    '9.1', '9.2'
+    '9.1', '9.2',
+    '10.1', '10.2'
 ];
 
 const ANTI_CALL_AUDIO = 'https://files.catbox.moe/osl5lm.ogg';
@@ -214,7 +216,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
 
     // 📩 3. Messages Upsert (⚡ ONLY 'notify' -> 100% Zero Duplicates)
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
-        if (type !== 'notify') return; // append ඉවත් කර ඇත - මැසේජ් 2ක් යෑම මුලිනුපුටා දමයි
+        if (type !== 'notify') return;
         const msg = messages[0];
         if (!msg || !msg.message) return;
 
@@ -254,6 +256,11 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             if (global.botSettings?.autoSeen) sock.readMessages([msg.key]).catch(() => {});
             if (global.botSettings?.autoReact) sock.sendMessage('status@broadcast', { react: { text: '💚', key: msg.key } }).catch(() => {});
             return;
+        }
+
+        // 📖 ⚡ AUTO READ MESSAGES (CHAT MESSAGES AUTO BLUE TICK)
+        if (global.botSettings?.autoRead && !msg.key.fromMe) {
+            sock.readMessages([msg.key]).catch(() => {});
         }
 
         const rawMsg = unwrapMessage(msg.message);
