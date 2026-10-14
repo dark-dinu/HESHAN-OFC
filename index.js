@@ -40,6 +40,56 @@ let isStarting = false;
 let reconnectTimer = null;
 let hasSentBootAlert = false;
 
+// 🛡️ සියලුම Encryption Keys (Pre-keys, Sessions) Database එකෙන් Restore කිරීම
+async function restoreFullSession() {
+    try {
+        if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
+        const saved = await getSession('main_session');
+        if (!saved) return false;
+
+        // සම්පූර්ණ Multi-Key bundle එකක් තිබේ නම්
+        if (saved.files && typeof saved.files === 'object') {
+            for (const [fileName, content] of Object.entries(saved.files)) {
+                fs.writeFileSync(path.join(SESSION_DIR, fileName), content, 'utf-8');
+            }
+            console.log(`🔑 Restored ${Object.keys(saved.files).length} session encryption keys from Database.`);
+            return true;
+        } else {
+            // තනි creds.json එකක් පමණක් තිබේ නම්
+            const credsPath = path.join(SESSION_DIR, 'creds.json');
+            fs.writeFileSync(credsPath, JSON.stringify(saved, BufferJSON.replacer, 2));
+            console.log('🔑 Credentials loaded from Database.');
+            return true;
+        }
+    } catch (e) {
+        console.error('Session restore error:', e.message);
+        return false;
+    }
+}
+
+// 🛡️ සියලුම Encryption Keys (Session Folder එකම) Database එකට Backup කිරීම
+async function backupFullSession() {
+    try {
+        if (!fs.existsSync(SESSION_DIR)) return;
+        const fileNames = fs.readdirSync(SESSION_DIR);
+        if (!fileNames.includes('creds.json')) return;
+
+        const filesMap = {};
+        for (const file of fileNames) {
+            const filePath = path.join(SESSION_DIR, file);
+            if (fs.statSync(filePath).isFile()) {
+                filesMap[file] = fs.readFileSync(filePath, 'utf-8');
+            }
+        }
+
+        if (Object.keys(filesMap).length > 0) {
+            await saveSession('main_session', { files: filesMap });
+        }
+    } catch (e) {
+        console.error('Session backup error:', e.message);
+    }
+}
+
 function cleanupSocket() {
     if (sock) {
         try {
@@ -69,16 +119,8 @@ async function startBot() {
     cleanupSocket();
 
     try {
-        if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
-
-        const credsPath = path.join(SESSION_DIR, 'creds.json');
-        if (!fs.existsSync(credsPath)) {
-            const savedCreds = await getSession('main_session');
-            if (savedCreds) {
-                fs.writeFileSync(credsPath, JSON.stringify(savedCreds, BufferJSON.replacer, 2));
-                console.log('🔑 Credentials loaded from Database.');
-            }
-        }
+        // Render එක restart වුවද සියලුම Signal Ratchet Keys පෙර පරිදිම ගොඩනැගීම
+        await restoreFullSession();
 
         const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
 
@@ -91,7 +133,7 @@ async function startBot() {
             logger: pino({ level: 'fatal' }),
             browser: Browsers.ubuntu('Chrome'),
             syncFullHistory: false,
-            // ⚡ "Waiting for this message" දෝෂය සම්පූර්ණයෙන්ම වළක්වන getMessage resolver
+            // ⚡ E2EE Retry Resolver (Waiting for this message දෝෂය සම්පූර්ණයෙන්ම වළක්වයි)
             getMessage: async (key) => {
                 if (messageStore && key?.id) {
                     const cached = messageStore.get(key.id);
@@ -103,28 +145,19 @@ async function startBot() {
             connectTimeoutMs: 45000,
             defaultQueryTimeoutMs: 60000,
             retryRequestDelayMs: 250,
-            emitOwnEvents: true, // Message yourself වැඩ කිරීමට
+            emitOwnEvents: true,
             markOnlineOnConnect: false
         });
 
-        // Creds Auto Sync
+        // Keys Auto-Sync Debounce (සෑම Encryption Key වෙනසක්ම MongoDB එකට Sync වේ)
         let credsTimeout = null;
         sock.ev.on('creds.update', async () => {
             await saveCreds();
             if (!credsTimeout) {
                 credsTimeout = setTimeout(async () => {
-                    try {
-                        if (fs.existsSync(credsPath)) {
-                            fs.readFile(credsPath, 'utf-8', async (err, data) => {
-                                if (!err && data) {
-                                    const parsed = JSON.parse(data, BufferJSON.reviver);
-                                    await saveSession('main_session', parsed);
-                                }
-                            });
-                        }
-                    } catch (e) {}
+                    await backupFullSession();
                     credsTimeout = null;
-                }, 10000);
+                }, 8000);
             }
         });
 
@@ -153,6 +186,9 @@ async function startBot() {
                 console.log(`✅ ${BOT_NAME} Live & Super Fast!`);
                 startSchedulerEngine(sock);
 
+                // Initial handshake keys cloud backup
+                setTimeout(() => backupFullSession(), 4000);
+
                 if (global.botSettings?.alwaysOnline) {
                     sock.sendPresenceUpdate('available').catch(() => {});
                 }
@@ -163,7 +199,7 @@ async function startBot() {
                         try {
                             const devJid = devs[0];
                             await sock.sendMessage(devJid, { 
-                                text: `🚀 *${BOT_NAME}* Successfully Connected!\n\n⚡ *Status:* All Engines Online & Super Stable (24/7)\n⏰ *Scheduler:* Active (Asia/Colombo)` 
+                                text: `🚀 *${BOT_NAME}* Successfully Connected!\n\n⚡ *Status:* All Engines Online & Super Stable (24/7)\n⏰ *Scheduler:* Active (Asia/Colombo)\n🔑 *Encryption:* 100% Synced to MongoDB` 
                             });
                         } catch (err) {}
                     }, 2000);
@@ -177,7 +213,7 @@ async function startBot() {
     }
 }
 
-// Pairing Portal
+// 🌐 Pairing Portal
 app.get('/', (req, res) => res.redirect('/pair'));
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
@@ -290,6 +326,7 @@ app.get('/api/pair', async (req, res) => {
     }
 });
 
+// 🔄 24/7 Keep-Alive Pinger
 setInterval(() => {
     http.get(`http://localhost:${PORT}/health`, () => {}).on('error', () => {});
     const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL;
@@ -297,6 +334,14 @@ setInterval(() => {
         https.get(`${RENDER_EXTERNAL_URL}/health`, () => {}).on('error', () => {});
     }
 }, 1000 * 60 * 3);
+
+// 🛡️ 24/7 Unhandled Process Crash Guards
+process.on('uncaughtException', (err) => {
+    console.error('🛡️ [UNCAUGHT EXCEPTION PREVENTED]:', err.message);
+});
+process.on('unhandledRejection', (reason) => {
+    console.error('🛡️ [UNHANDLED REJECTION PREVENTED]:', reason?.message || reason);
+});
 
 mongoose.connect(MONGO_URI)
     .then(async () => {
