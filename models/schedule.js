@@ -4,9 +4,12 @@ const scheduleSchema = new mongoose.Schema({
     type: { type: String, enum: ['chat', 'channel'], required: true },
     target: { type: String, required: true },
     message: { type: String, required: true },
-    time: { type: String, required: true, index: true }, // e.g. "18:30" (Fast indexed query)
+    time: { type: String, required: true, index: true }, // e.g. "18:30"
     lastSentTimestamp: { type: String, default: '' }     // "YYYY-MM-DD HH:mm"
 }, { timestamps: true });
+
+// ⚡ Fast Compound Index for High-Performance Queries
+scheduleSchema.index({ time: 1, lastSentTimestamp: 1 });
 
 const Schedule = mongoose.models.Schedule || mongoose.model('Schedule', scheduleSchema);
 
@@ -54,7 +57,7 @@ function startSchedulerEngine(sock) {
             const { time: currentTime, date: currentDate } = getSLTimeAndDate();
             const currentSlot = `${currentDate} ${currentTime}`;
 
-            // ⚡ Optimized DB Query (සියල්ල load නොකර අදාළ වේලාව සහ තවම නොයැවූ tasks පමණක් DB එකෙන් ගනී)
+            // ⚡ Optimized DB Query (අදාළ වේලාව සහ තවම නොයැවූ tasks පමණක් DB එකෙන් ලබාගනී)
             const tasks = await Schedule.find({
                 time: currentTime,
                 lastSentTimestamp: { $ne: currentSlot }
@@ -64,7 +67,7 @@ function startSchedulerEngine(sock) {
 
             for (const task of tasks) {
                 const taskId = String(task._id);
-                if (inFlightTasks.has(taskId)) continue; // Concurrency protection
+                if (inFlightTasks.has(taskId)) continue;
                 inFlightTasks.add(taskId);
 
                 console.log(`[TRIGGER] Executing Schedule ID: ${taskId} at ${currentTime}`);
@@ -134,4 +137,4 @@ function startSchedulerEngine(sock) {
     }, 15000);
 }
 
-module.exports = { Schedule, startSchedulerEngine, getSLTime };
+module.exports = { Schedule, startSchedulerEngine, getSLTime, getSLTimeAndDate, normalizeTime };
