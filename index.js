@@ -40,14 +40,13 @@ let isStarting = false;
 let reconnectTimer = null;
 let hasSentBootAlert = false;
 
-// 🛡️ Local Folder එකේ creds නැතිනම් පමණක් MongoDB එකෙන් Restore කරයි (Overwrite වීම් 100% වළක්වයි)
+// 🛡️ Render එක මුලින්ම On වෙද්දී පමණක් Database එකෙන් Session එක ගනී (Handshake එක මැදදී Overwrite නොවේ)
 async function restoreFullSession() {
     try {
         if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
 
         const credsPath = path.join(SESSION_DIR, 'creds.json');
-        // Local creds දැනටමත් තිබේ නම් restore නොකරයි
-        if (fs.existsSync(credsPath)) return true;
+        if (fs.existsSync(credsPath)) return true; // Local files දැනටමත් තිබේ නම් restore නොකරයි
 
         const saved = await getSession('main_session');
         if (!saved) return false;
@@ -70,7 +69,7 @@ async function restoreFullSession() {
     }
 }
 
-// 🛡️ සියලුම Encryption Keys Database එකට Realtime Backup කිරීම
+// 🛡️ Phone එක සාර්ථකව Link වූ පසු පමණක් MongoDB එකට සියලුම Keys Sync කිරීම
 async function backupFullSession() {
     try {
         if (!fs.existsSync(SESSION_DIR)) return;
@@ -87,6 +86,7 @@ async function backupFullSession() {
 
         if (Object.keys(filesMap).length > 0) {
             await saveSession('main_session', { files: filesMap });
+            console.log('☁️ Session securely backed up to MongoDB.');
         }
     } catch (e) {
         console.error('Session backup error:', e.message);
@@ -133,8 +133,7 @@ async function startBot() {
             },
             printQRInTerminal: false,
             logger: pino({ level: 'fatal' }),
-            // ⚡ Pairing Code එක ක්ෂණිකව Accept වන Browser Identifier එක
-            browser: Browsers.macOS('Desktop'),
+            browser: Browsers.ubuntu('Chrome'), // Pairing සඳහා වඩාත්ම විශ්වාසදායක Browser Engine එක
             syncFullHistory: false,
             getMessage: async (key) => {
                 if (messageStore && key?.id) {
@@ -143,19 +142,15 @@ async function startBot() {
                 }
                 return undefined;
             },
-            keepAliveIntervalMs: 25000,
+            keepAliveIntervalMs: 30000,
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
-            retryRequestDelayMs: 250,
             emitOwnEvents: true,
             markOnlineOnConnect: false
         });
 
-        // ⚡ Creds Update වූ සැනින් Disk එකට සහ Database එකට වහාම Save වේ
-        sock.ev.on('creds.update', async () => {
-            await saveCreds();
-            await backupFullSession();
-        });
+        // ⚡ Handshake එක හිර නොවී සුමටව Disk එකට ලියවීමට පමණක් ඉඩ දෙයි
+        sock.ev.on('creds.update', saveCreds);
 
         registerAllHandlers(sock, devs, devNumbers, BOT_NAME);
 
@@ -166,28 +161,24 @@ async function startBot() {
                 console.log(`⚠️ Connection closed: ${statusCode}`);
 
                 if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-                    console.log('🔴 Session logged out. Purging session...');
+                    console.log('🔴 Logged out. Resetting session...');
                     if (fs.existsSync(SESSION_DIR)) fs.rmSync(SESSION_DIR, { recursive: true, force: true });
                     await deleteSession('main_session');
                     scheduleReconnect(3000);
                 } else if (statusCode === DisconnectReason.restartRequired || statusCode === 515) {
-                    // ⚡ PAIRING SUCCESS RESTART: අලුත් Keys තහවුරු කරගෙන 100ms වලින් නැවත Connect වීම
-                    console.log('🔄 Restart required (515) - Completing pairing handshake...');
-                    await backupFullSession();
-                    scheduleReconnect(300);
-                } else if (statusCode === 440 || statusCode === DisconnectReason.connectionReplaced) {
-                    cleanupSocket();
-                    scheduleReconnect(3000);
+                    // ⚡ PAIRING SUCCESS: Phone එක Code එක ගත් පසු තත්පරයෙන් Reconnect වී Link එක සම්පූර්ණ කරයි
+                    console.log('🔄 Restart required (515) - Connecting paired device...');
+                    scheduleReconnect(500);
                 } else {
-                    scheduleReconnect(1500);
+                    scheduleReconnect(2000);
                 }
             } else if (connection === 'open') {
                 isStarting = false;
                 console.log(`✅ ${BOT_NAME} Live & Super Fast!`);
                 startSchedulerEngine(sock);
 
-                // Handshake එක සාර්ථක වූ සැනින් MongoDB එකට Keys Sync කිරීම
-                await backupFullSession();
+                // Phone එක සම්බන්ධ වූ සැනින් Keys Database එකට සුරකියි
+                setTimeout(() => backupFullSession(), 3000);
 
                 if (global.botSettings?.alwaysOnline) {
                     sock.sendPresenceUpdate('available').catch(() => {});
@@ -214,9 +205,7 @@ async function startBot() {
     }
 }
 
-// ==========================================
-// 🌐 PAIRING PORTAL (With Reset Support)
-// ==========================================
+// 🌐 Pairing Portal (පිරිසිදු UI එක පමණි - අමතර බටන් ඉවත් කර ඇත)
 app.get('/', (req, res) => res.redirect('/pair'));
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
@@ -240,8 +229,6 @@ app.get('/pair', (req, res) => {
             button { width: 100%; padding: 15px; border: none; border-radius: 12px; background: #00e676; color: #000; font-size: 15px; font-weight: 700; cursor: pointer; transition: 0.2s; }
             button:hover { background: #00c853; transform: translateY(-1px); }
             button:disabled { background: #444; color: #888; cursor: not-allowed; }
-            .btn-reset { background: rgba(255, 68, 68, 0.15); border: 1px solid rgba(255, 68, 68, 0.3); color: #ff5252; margin-top: 15px; padding: 12px; }
-            .btn-reset:hover { background: rgba(255, 68, 68, 0.3); color: #fff; }
             #resultBox { margin-top: 25px; display: none; }
             .code-display { background: rgba(0, 230, 118, 0.08); border: 2px dashed #00e676; padding: 15px; border-radius: 12px; font-size: 28px; font-weight: 700; letter-spacing: 4px; color: #00e676; cursor: pointer; user-select: all; }
             .error-box { background: rgba(255, 68, 68, 0.1); border: 1px solid rgba(255, 68, 68, 0.2); color: #ff5252; padding: 12px; border-radius: 10px; font-size: 13px; margin-top: 15px; display: none; }
@@ -259,7 +246,6 @@ app.get('/pair', (req, res) => {
                 <div class="code-display" id="codeText" onclick="copyCode()"></div>
                 <p style="font-size: 12px; color: #00e676; margin-top: 12px;">Enter this code on WhatsApp Linked Devices!</p>
             </div>
-            <button class="btn-reset" onclick="resetSession()">🔄 Reset Session (If Stuck)</button>
         </div>
         <script>
             async function getCode() {
@@ -301,18 +287,6 @@ app.get('/pair', (req, res) => {
                 }
             }
 
-            async function resetSession() {
-                if (!confirm("Are you sure you want to clear the old session and start fresh?")) return;
-                try {
-                    const res = await fetch('/api/reset-session');
-                    const d = await res.json();
-                    alert(d.message || "Session reset successfully!");
-                    location.reload();
-                } catch (e) {
-                    alert("Error resetting session: " + e.message);
-                }
-            }
-
             function copyCode() {
                 const text = document.getElementById('codeText').innerText;
                 navigator.clipboard.writeText(text);
@@ -324,7 +298,7 @@ app.get('/pair', (req, res) => {
     `);
 });
 
-// ⚡ Pairing API
+// ⚡ Pairing API (Un-registered session පිරිසිදු කර කෝඩ් එක නිකුත් කරයි)
 app.get('/api/pair', async (req, res) => {
     let phone = req.query.phone;
     if (!phone) return res.json({ status: false, message: 'Phone number is required' });
@@ -334,10 +308,10 @@ app.get('/api/pair', async (req, res) => {
         if (!sock) return res.json({ status: false, message: 'Bot engine is initializing. Please wait 5s.' });
 
         if (sock.authState?.creds?.registered) {
-            return res.json({ status: false, message: 'Bot is already linked to WhatsApp! Click "Reset Session" to re-link.' });
+            return res.json({ status: false, message: 'Bot is already linked to WhatsApp!' });
         }
 
-        await delay(1500);
+        await delay(1000);
         let code = await sock.requestPairingCode(phone);
         code = code?.match(/.{1,4}/g)?.join('-') || code;
         return res.json({ status: true, code });
@@ -346,18 +320,12 @@ app.get('/api/pair', async (req, res) => {
     }
 });
 
-// 🔄 Clean Reset API (හිරවූ පරණ Keys ක්ෂණිකව මකා නැවුම්ව පටන් ගැනීම)
-app.get('/api/reset-session', async (req, res) => {
-    try {
-        cleanupSocket();
-        if (fs.existsSync(SESSION_DIR)) fs.rmSync(SESSION_DIR, { recursive: true, force: true });
-        await deleteSession('main_session');
-        scheduleReconnect(1000);
-        return res.json({ status: true, message: 'Session cleaned! Ready for fresh pairing.' });
-    } catch (err) {
-        return res.json({ status: false, message: err.message });
+// Periodic Key Sync (සෑම විනාඩි 10කට වරක් Background Sync එකක් දුවයි)
+setInterval(() => {
+    if (sock?.authState?.creds?.registered) {
+        backupFullSession();
     }
-});
+}, 1000 * 60 * 10);
 
 // 24/7 Keep-Alive Pinger
 setInterval(() => {
