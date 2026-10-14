@@ -23,14 +23,14 @@ if (fs.existsSync(commandsDir)) {
     console.log(`⚡ [ENGINE] Pre-loaded ${commands.size} commands into RAM!`);
 }
 
-// Memory Stores
+// Memory Stores (RAM Safe)
 const messageStore = new Map();
 const mediaCacheStore = new Map();
 const viewOnceStore = new Map();
 const statusStore = new Map();
 const processedMessageIds = new Set();
 const MAX_MSG_STORE = 500;
-const MAX_MEDIA_STORE = 25;
+const MAX_MEDIA_STORE = 20;
 
 // ⏱️ TIME LIMIT SETTING (තත්පර 30කට වඩා පරණ මැසේජ් සම්පූර්ණයෙන්ම Ignore කරයි)
 const MAX_MESSAGE_AGE_SECONDS = 30;
@@ -38,6 +38,9 @@ const MAX_MESSAGE_AGE_SECONDS = 30;
 async function downloadMedia(content, type) {
     try {
         if (!content) return null;
+        // 15MB ට වඩා විශාල මාධ්‍ය RAM එකට ගැනීම වළක්වයි
+        if (content.fileLength && Number(content.fileLength) > 15 * 1024 * 1024) return null;
+
         const stream = await downloadContentFromMessage(content, type);
         let buffer = Buffer.from([]);
         for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
@@ -96,7 +99,7 @@ const ANTI_CALL_AUDIO = 'https://files.catbox.moe/osl5lm.ogg';
 
 function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
 
-    // 📞 1. Anti-Call
+    // 📞 1. Anti-Call Engine
     sock.ev.on('call', async (callEvents) => {
         if (!global.botSettings?.antiCall) return;
 
@@ -119,7 +122,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         }
     });
 
-    // 🗑️ Anti-Delete Recovery
+    // 🗑️ Anti-Delete Recovery Engine
     async function recoverDeletedMessage(deletedId) {
         if (!global.botSettings?.antiDelete || !deletedId) return;
 
@@ -209,27 +212,20 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         }
     });
 
-    // 📩 3. Messages Upsert
+    // 📩 3. Messages Upsert (⚡ ONLY 'notify' -> 100% Zero Duplicates)
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
-        if (type !== 'notify' && type !== 'append') return;
+        if (type !== 'notify') return; // append ඉවත් කර ඇත - මැසේජ් 2ක් යෑම මුලිනුපුටා දමයි
         const msg = messages[0];
         if (!msg || !msg.message) return;
 
-        // ⏱️ CRITICAL TIME FILTER: පරණ මැසේජ් සහ Queue වල හිරවී තිබී ආ මැසේජ් Ignore කිරීම
+        // ⏱️ Message Age Check (පරණ මැසේජ් Ignore කිරීම)
         const msgTimestamp = Number(msg.messageTimestamp);
         if (msgTimestamp) {
             const currentEpoch = Math.floor(Date.now() / 1000);
-            const ageInSeconds = currentEpoch - msgTimestamp;
-
-            // මැසේජ් එක තත්පර 30කට වඩා පරණ නම් කෙළින්ම drop කර දමයි
-            if (ageInSeconds > MAX_MESSAGE_AGE_SECONDS) {
-                return;
-            }
+            if ((currentEpoch - msgTimestamp) > MAX_MESSAGE_AGE_SECONDS) return;
         }
 
         const msgId = msg.key?.id;
-
-        // 🛡️ Duplicate ID Filter
         if (msgId) {
             if (processedMessageIds.has(msgId)) return;
             processedMessageIds.add(msgId);
@@ -263,7 +259,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         const rawMsg = unwrapMessage(msg.message);
         if (!rawMsg) return;
 
-        // Caching
+        // Memory Safe Caching
         if (msg.key?.id) {
             if (messageStore.size >= MAX_MSG_STORE) messageStore.delete(messageStore.keys().next().value);
             messageStore.set(msg.key.id, { key: msg.key, message: rawMsg, pushName: msg.pushName });
