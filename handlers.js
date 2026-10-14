@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
 
-// Commands Pre-loading into RAM
+// ⚡ RAM-First Pre-loaded Commands Map
 const commands = new Map();
 const commandsDir = path.join(__dirname, 'commands');
 
@@ -16,30 +16,29 @@ if (fs.existsSync(commandsDir)) {
                     cmd.aliases.forEach(alias => commands.set(alias.toLowerCase(), cmd));
                 }
             } catch (e) {
-                console.error(`Failed to preload command ${file}:`, e.message);
+                console.error(`Failed to preload [${file}]:`, e.message);
             }
         }
     });
     console.log(`⚡ [ENGINE] Pre-loaded ${commands.size} commands into RAM!`);
 }
 
-// Memory Stores (RAM Safe)
+// 🛡️ High-Performance RAM Safe Caching Stores
 const messageStore = new Map();
 const mediaCacheStore = new Map();
 const viewOnceStore = new Map();
 const statusStore = new Map();
 const processedMessageIds = new Set();
-const MAX_MSG_STORE = 500;
-const MAX_MEDIA_STORE = 20;
 
-// ⏱️ TIME LIMIT SETTING (තත්පර 30කට වඩා පරණ මැසේජ් සම්පූර්ණයෙන්ම Ignore කරයි)
+const MAX_MSG_STORE = 300;
+const MAX_MEDIA_STORE = 10;
 const MAX_MESSAGE_AGE_SECONDS = 30;
 
+// ⚡ Low-Memory Buffer Downloader (Max 8MB per media)
 async function downloadMedia(content, type) {
     try {
         if (!content) return null;
-        // 15MB ට වඩා විශාල මාධ්‍ය RAM එකට ගැනීම වළක්වයි
-        if (content.fileLength && Number(content.fileLength) > 15 * 1024 * 1024) return null;
+        if (content.fileLength && Number(content.fileLength) > 8 * 1024 * 1024) return null;
 
         const stream = await downloadContentFromMessage(content, type);
         let buffer = Buffer.from([]);
@@ -50,6 +49,7 @@ async function downloadMedia(content, type) {
     }
 }
 
+// 🛡️ Normal & Business WhatsApp Universal Message Unwrapper
 function unwrapMessage(msg) {
     let m = msg;
     if (!m) return null;
@@ -58,6 +58,7 @@ function unwrapMessage(msg) {
     if (m.viewOnceMessageV2?.message) m = m.viewOnceMessageV2.message;
     if (m.viewOnceMessageV2Extension?.message) m = m.viewOnceMessageV2Extension.message;
     if (m.documentWithCaptionMessage?.message) m = m.documentWithCaptionMessage.message;
+    if (m.editedMessage?.message?.protocolMessage?.editedMessage) m = m.editedMessage.message.protocolMessage.editedMessage;
     return m;
 }
 
@@ -83,7 +84,6 @@ const viewOnceEmojis = [
     '💔', '🫡', '👍', '🤣', '😏', '😌', '👎', '🙈', '🙏', '🤝'
 ];
 
-// ⚡ 10.1 සහ 10.2 Shortcuts සහිත වලංගු අංක ලැයිස්තුව
 const validSettingNumbers = [
     '1.1', '1.2', '1.3', '1.4', '1.5', '1.6',
     '2.1', '2.2', '2.3',
@@ -146,7 +146,8 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
 
         try {
             if (type === 'conversation' || type === 'extendedTextMessage') {
-                const textBody = m.conversation || m.extendedTextMessage?.text || '';
+                const textBody = (m.conversation || m.extendedTextMessage?.text || '').trim();
+                if (!textBody) return; // Empty protection
                 await sock.sendMessage(sendTarget, { text: `${alertText}\n\n💬 *Message:* ${textBody}` });
             } else {
                 let mediaBuffer = mediaCacheStore.get(deletedId);
@@ -156,7 +157,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
                     mediaBuffer = await downloadMedia(m[type], mediaType);
                 }
 
-                if (mediaBuffer) {
+                if (mediaBuffer && mediaBuffer.length > 0) {
                     if (type === 'imageMessage') {
                         await sock.sendMessage(sendTarget, { image: mediaBuffer, caption: `${alertText}\n\n📝 *Caption:* ${m.imageMessage?.caption || 'None'}` });
                     } else if (type === 'videoMessage') {
@@ -184,7 +185,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         const mediaType = targetKey.replace('Message', '');
         const buffer = await downloadMedia(inner[targetKey], mediaType);
 
-        if (buffer) {
+        if (buffer && buffer.length > 0) {
             const caption = inner[targetKey]?.caption || `👁️‍🗨️ *Anti View-Once Unlocked by ${BOT_NAME}*`;
             if (mediaType === 'image') {
                 await sock.sendMessage(replyJid, { image: buffer, caption }, { quoted: quotedMsgKey });
@@ -220,7 +221,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         const msg = messages[0];
         if (!msg || !msg.message) return;
 
-        // ⏱️ Message Age Check (පරණ මැසේජ් Ignore කිරීම)
+        // ⏱️ Message Age Check (Stale Queue Messages Ignore කිරීම)
         const msgTimestamp = Number(msg.messageTimestamp);
         if (msgTimestamp) {
             const currentEpoch = Math.floor(Date.now() / 1000);
@@ -231,7 +232,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         if (msgId) {
             if (processedMessageIds.has(msgId)) return;
             processedMessageIds.add(msgId);
-            if (processedMessageIds.size > 200) {
+            if (processedMessageIds.size > 150) {
                 const first = processedMessageIds.values().next().value;
                 processedMessageIds.delete(first);
             }
@@ -250,7 +251,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         // Status Broadcast
         if (remoteJid === 'status@broadcast') {
             if (msg.key?.id) {
-                if (statusStore.size >= 40) statusStore.delete(statusStore.keys().next().value);
+                if (statusStore.size >= 30) statusStore.delete(statusStore.keys().next().value);
                 statusStore.set(msg.key.id, msg);
             }
             if (global.botSettings?.autoSeen) sock.readMessages([msg.key]).catch(() => {});
@@ -258,7 +259,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             return;
         }
 
-        // 📖 ⚡ AUTO READ MESSAGES (CHAT MESSAGES AUTO BLUE TICK)
+        // 📖 Auto Read Messages (Chat Messages Blue Tick)
         if (global.botSettings?.autoRead && !msg.key.fromMe) {
             sock.readMessages([msg.key]).catch(() => {});
         }
@@ -266,7 +267,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         const rawMsg = unwrapMessage(msg.message);
         if (!rawMsg) return;
 
-        // Memory Safe Caching
+        // Caching for E2EE Retry and Anti-Delete
         if (msg.key?.id) {
             if (messageStore.size >= MAX_MSG_STORE) messageStore.delete(messageStore.keys().next().value);
             messageStore.set(msg.key.id, { key: msg.key, message: rawMsg, pushName: msg.pushName });
@@ -306,7 +307,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
 
         if (viewOnce) {
             if (msg.key?.id) {
-                if (viewOnceStore.size >= 40) viewOnceStore.delete(viewOnceStore.keys().next().value);
+                if (viewOnceStore.size >= 30) viewOnceStore.delete(viewOnceStore.keys().next().value);
                 viewOnceStore.set(msg.key.id, { message: viewOnce, msg });
             }
 
@@ -331,7 +332,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             }
         }
 
-        // Mode Rules
+        // Mode Filters
         if (global.botSettings?.mode === 'private' && !isDev) return;
         if (global.botSettings?.mode === 'group' && !remoteJid.endsWith('@g.us') && !isDev) return;
 
@@ -343,7 +344,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         const stanzaId = contextInfo?.stanzaId;
         const isStatusReply = contextInfo?.remoteJid === 'status@broadcast';
 
-        // Emoji Unlock
+        // Emoji Unlock for View-Once
         if (viewOnceEmojis.includes(text) && quotedMsg) {
             let targetVO = quotedMsg;
             if (stanzaId && viewOnceStore.has(stanzaId)) {
@@ -378,10 +379,12 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
                         return;
                     }
                 } else if (target.conversation || target.extendedTextMessage) {
-                    const statusText = target.conversation || target.extendedTextMessage?.text || '';
-                    await sock.sendMessage(remoteJid, { text: `📝 *Status Text:*\n\n${statusText}` }, { quoted: msg });
-                    await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
-                    return;
+                    const statusText = (target.conversation || target.extendedTextMessage?.text || '').trim();
+                    if (statusText) {
+                        await sock.sendMessage(remoteJid, { text: `📝 *Status Text:*\n\n${statusText}` }, { quoted: msg });
+                        await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
+                        return;
+                    }
                 }
             }
         }
@@ -395,7 +398,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             }
         }
 
-        // Setting Shortcuts
+        // Setting Shortcuts (1.1, 10.1 ආදිය)
         if (isDev && validSettingNumbers.includes(text.toLowerCase())) {
             const settingCmd = commands.get('setting');
             if (settingCmd) {
@@ -404,7 +407,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             }
         }
 
-        // Fast Command Execution
+        // ⚡ Fast Command Router (Sub-second execution)
         if (!text.startsWith('.')) return;
         const args = text.slice(1).trim().split(/ +/);
         const commandName = args.shift().toLowerCase();
@@ -414,12 +417,12 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             try {
                 await cmd.execute(sock, msg, args, isDev, BOT_NAME, cleanSender || botUserNumber, commandName);
             } catch (err) {
-                console.error(`Command [${commandName}] execution error:`, err.message);
+                console.error(`Command [${commandName}] failed:`, err.message);
             }
         }
     });
 
-    // Messages Update
+    // Messages Update (Revoke / Anti-Delete)
     sock.ev.on('messages.update', async (updates) => {
         for (const update of updates) {
             const protocolMsg = update.update?.message?.protocolMessage;
