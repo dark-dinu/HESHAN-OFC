@@ -2,9 +2,14 @@ const fs = require('fs');
 const path = require('path');
 const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
 
-// ⚡ RAM-First Pre-loaded Commands Map
+// ⚡ RAM-First Pre-loaded Commands Map (Linux Case-Safe)
 const commands = new Map();
-const commandsDir = path.join(__dirname, 'commands');
+
+// 'commands' හෝ 'Commands' ෆෝල්ඩර දෙකම Linux වල හඳුනාගැනීම
+let commandsDir = path.join(__dirname, 'commands');
+if (!fs.existsSync(commandsDir)) {
+    commandsDir = path.join(__dirname, 'Commands');
+}
 
 if (fs.existsSync(commandsDir)) {
     fs.readdirSync(commandsDir).forEach(file => {
@@ -21,9 +26,11 @@ if (fs.existsSync(commandsDir)) {
         }
     });
     console.log(`⚡ [ENGINE] Pre-loaded ${commands.size} commands into RAM!`);
+} else {
+    console.error('❌ [ERROR] Commands folder not found!');
 }
 
-// 🛡️ High-Performance RAM Safe Caching Stores
+// 🛡️ High-Performance Memory Stores
 const messageStore = new Map();
 const mediaCacheStore = new Map();
 const viewOnceStore = new Map();
@@ -32,9 +39,8 @@ const processedMessageIds = new Set();
 
 const MAX_MSG_STORE = 300;
 const MAX_MEDIA_STORE = 10;
-const MAX_MESSAGE_AGE_SECONDS = 30;
 
-// ⚡ Low-Memory Buffer Downloader (Max 8MB per media)
+// ⚡ Low-Memory Buffer Downloader
 async function downloadMedia(content, type) {
     try {
         if (!content) return null;
@@ -49,7 +55,7 @@ async function downloadMedia(content, type) {
     }
 }
 
-// 🛡️ Normal & Business WhatsApp Universal Message Unwrapper
+// 🛡️ Message Unwrapper
 function unwrapMessage(msg) {
     let m = msg;
     if (!m) return null;
@@ -101,7 +107,7 @@ const ANTI_CALL_AUDIO = 'https://files.catbox.moe/osl5lm.ogg';
 
 function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
 
-    // 📞 1. Anti-Call Engine
+    // 📞 Anti-Call Engine
     sock.ev.on('call', async (callEvents) => {
         if (!global.botSettings?.antiCall) return;
 
@@ -147,7 +153,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         try {
             if (type === 'conversation' || type === 'extendedTextMessage') {
                 const textBody = (m.conversation || m.extendedTextMessage?.text || '').trim();
-                if (!textBody) return; // Empty protection
+                if (!textBody) return;
                 await sock.sendMessage(sendTarget, { text: `${alertText}\n\n💬 *Message:* ${textBody}` });
             } else {
                 let mediaBuffer = mediaCacheStore.get(deletedId);
@@ -174,7 +180,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         } catch (err) {}
     }
 
-    // 👁️‍🗨️ View-Once Unlock Helper
+    // 👁️ View-Once Unlock Helper
     async function sendUnlockedViewOnce(targetMessage, replyJid, quotedMsgKey) {
         const inner = unwrapMessage(targetMessage);
         if (!inner) return false;
@@ -199,7 +205,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         return false;
     }
 
-    // 🤩 2. Reaction Listener
+    // Reaction Listener
     sock.ev.on('messages.reaction', async (reactions) => {
         for (const r of reactions) {
             const reactionText = r.reaction?.text;
@@ -215,24 +221,20 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         }
     });
 
-    // 📩 3. Messages Upsert (⚡ ONLY 'notify' -> 100% Zero Duplicates)
+    // 📩 Messages Upsert (⚡ 'notify' සහ 'append' දෙකම භාරගනී - Self/Owner Messages වැඩ කරයි!)
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
-        if (type !== 'notify') return;
+        // notify (අන් අයගේ මැසේජ්) හෝ append (තමන්ගේ Phone එකෙන්ම දාන මැසේජ්)
+        if (type !== 'notify' && type !== 'append') return;
+
         const msg = messages[0];
         if (!msg || !msg.message) return;
 
-        // ⏱️ Message Age Check (Stale Queue Messages Ignore කිරීම)
-        const msgTimestamp = Number(msg.messageTimestamp);
-        if (msgTimestamp) {
-            const currentEpoch = Math.floor(Date.now() / 1000);
-            if ((currentEpoch - msgTimestamp) > MAX_MESSAGE_AGE_SECONDS) return;
-        }
-
+        // Duplicate Message Guard
         const msgId = msg.key?.id;
         if (msgId) {
             if (processedMessageIds.has(msgId)) return;
             processedMessageIds.add(msgId);
-            if (processedMessageIds.size > 150) {
+            if (processedMessageIds.size > 200) {
                 const first = processedMessageIds.values().next().value;
                 processedMessageIds.delete(first);
             }
@@ -259,7 +261,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             return;
         }
 
-        // 📖 Auto Read Messages (Chat Messages Blue Tick)
+        // Auto Read
         if (global.botSettings?.autoRead && !msg.key.fromMe) {
             sock.readMessages([msg.key]).catch(() => {});
         }
@@ -267,23 +269,10 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         const rawMsg = unwrapMessage(msg.message);
         if (!rawMsg) return;
 
-        // Caching for E2EE Retry and Anti-Delete
+        // Cache for Anti-delete
         if (msg.key?.id) {
             if (messageStore.size >= MAX_MSG_STORE) messageStore.delete(messageStore.keys().next().value);
             messageStore.set(msg.key.id, { key: msg.key, message: rawMsg, pushName: msg.pushName });
-
-            if (global.botSettings?.antiDelete) {
-                const mType = Object.keys(rawMsg)[0];
-                if (['imageMessage', 'videoMessage', 'audioMessage', 'stickerMessage'].includes(mType)) {
-                    setImmediate(async () => {
-                        const buf = await downloadMedia(rawMsg[mType], mType.replace('Message', ''));
-                        if (buf) {
-                            if (mediaCacheStore.size >= MAX_MEDIA_STORE) mediaCacheStore.delete(mediaCacheStore.keys().next().value);
-                            mediaCacheStore.set(msg.key.id, buf);
-                        }
-                    });
-                }
-            }
         }
 
         const isMe = Boolean(msg.key.fromMe);
@@ -294,6 +283,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         const cleanSender = rawSender ? rawSender.split(':')[0].split('@')[0].replace(/[^0-9]/g, '') : '';
         const cleanJid = cleanSender ? `${cleanSender}@s.whatsapp.net` : '';
 
+        // Developer / Owner Verification
         const isDev = isMe || 
                       devNumbers.includes(cleanSender) || 
                       devs.includes(cleanJid) ||
@@ -398,7 +388,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             }
         }
 
-        // Setting Shortcuts (1.1, 10.1 ආදිය)
+        // Setting Shortcuts (1.1, 10.1 etc.)
         if (isDev && validSettingNumbers.includes(text.toLowerCase())) {
             const settingCmd = commands.get('setting');
             if (settingCmd) {
@@ -407,14 +397,17 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             }
         }
 
-        // ⚡ Fast Command Router (Sub-second execution)
-        if (!text.startsWith('.')) return;
-        const args = text.slice(1).trim().split(/ +/);
+        // ⚡ Fast Command Execution (Prefix . සහ . නැතිව දෙකෙන්ම)
+        const hasPrefix = text.startsWith('.');
+        const cleanText = hasPrefix ? text.slice(1).trim() : text.trim();
+        const args = cleanText.split(/ +/);
         const commandName = args.shift().toLowerCase();
 
-        const cmd = commands.get(commandName);
-        if (cmd) {
+        // Dot prefix එකෙන් එන commands හෝ direct matching commands
+        if (hasPrefix && commands.has(commandName)) {
+            const cmd = commands.get(commandName);
             try {
+                console.log(`⚡ [EXEC] Command: .${commandName} from ${cleanSender || 'Owner'}`);
                 await cmd.execute(sock, msg, args, isDev, BOT_NAME, cleanSender || botUserNumber, commandName);
             } catch (err) {
                 console.error(`Command [${commandName}] failed:`, err.message);
@@ -422,7 +415,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         }
     });
 
-    // Messages Update (Revoke / Anti-Delete)
+    // Messages Update
     sock.ev.on('messages.update', async (updates) => {
         for (const update of updates) {
             const protocolMsg = update.update?.message?.protocolMessage;
