@@ -47,7 +47,7 @@ const inFlightTasks = new Set(); // Concurrency Lock (දෙවරක් යැ�
 function startSchedulerEngine(sock) {
     if (schedulerTimer) clearInterval(schedulerTimer);
 
-    console.log('⏰ [SCHEDULER ENGINE] Live and Running!');
+    console.log('⏰ [SCHEDULER ENGINE] Live and Operational!');
 
     // සෑම තත්පර 15කට වරක් Check කරයි
     schedulerTimer = setInterval(async () => {
@@ -57,11 +57,13 @@ function startSchedulerEngine(sock) {
             const { time: currentTime, date: currentDate } = getSLTimeAndDate();
             const currentSlot = `${currentDate} ${currentTime}`;
 
-            // ⚡ Optimized DB Query (අදාළ වේලාව සහ තවම නොයැවූ tasks පමණක් DB එකෙන් ලබාගනී)
+            // ⚡ Low-Memory Query (අවශ්‍ය fields පමණක් RAM එකට ගනී)
             const tasks = await Schedule.find({
                 time: currentTime,
                 lastSentTimestamp: { $ne: currentSlot }
-            }).lean();
+            })
+            .select('type target message time lastSentTimestamp')
+            .lean();
 
             if (!tasks || tasks.length === 0) return;
 
@@ -70,7 +72,12 @@ function startSchedulerEngine(sock) {
                 if (inFlightTasks.has(taskId)) continue;
                 inFlightTasks.add(taskId);
 
-                console.log(`[TRIGGER] Executing Schedule ID: ${taskId} at ${currentTime}`);
+                // 🛡️ Empty Message Check (Rule 4: Safety Guard)
+                const payloadText = (task.message || '').trim();
+                if (!payloadText) {
+                    inFlightTasks.delete(taskId);
+                    continue;
+                }
 
                 let sentSuccessfully = false;
 
@@ -86,19 +93,26 @@ function startSchedulerEngine(sock) {
                                     const meta = await sock.newsletterMetadata('invite', code);
                                     if (meta?.id) channelJid = meta.id;
                                 } catch (e) {
-                                    console.error('[CHANNEL RESOLVE ERROR]:', e.message);
+                                    console.error('[CHANNEL RESOLVE FAILED]:', e.message);
+                                    channelJid = null;
                                 }
                             }
+                        }
+
+                        // Resolve නොවූ invite links drop කරයි
+                        if (!channelJid) {
+                            inFlightTasks.delete(taskId);
+                            continue;
                         }
 
                         if (!channelJid.includes('@')) {
                             channelJid = `${channelJid}@newsletter`;
                         }
 
-                        await sock.sendMessage(channelJid, { text: task.message });
+                        await sock.sendMessage(channelJid, { text: payloadText });
                         sentSuccessfully = true;
                     } 
-                    // 2. Chat Schedule
+                    // 2. Chat Schedule (Direct / Group)
                     else {
                         let targetJid = task.target.trim();
 
@@ -107,7 +121,7 @@ function startSchedulerEngine(sock) {
                         }
 
                         let mentions = [];
-                        if (targetJid.endsWith('@g.us') && task.message.includes('@')) {
+                        if (targetJid.endsWith('@g.us') && payloadText.includes('@')) {
                             const groupMeta = await sock.groupMetadata(targetJid).catch(() => null);
                             if (groupMeta?.participants) {
                                 mentions = groupMeta.participants.map(p => p.id);
@@ -115,7 +129,7 @@ function startSchedulerEngine(sock) {
                         }
 
                         await sock.sendMessage(targetJid, { 
-                            text: task.message, 
+                            text: payloadText, 
                             mentions: mentions.length > 0 ? mentions : undefined 
                         });
                         sentSuccessfully = true;
@@ -123,18 +137,24 @@ function startSchedulerEngine(sock) {
 
                     if (sentSuccessfully) {
                         await Schedule.updateOne({ _id: task._id }, { $set: { lastSentTimestamp: currentSlot } });
-                        console.log(`✅ [SUCCESS] Scheduled Message Delivered to: ${task.target}`);
+                        console.log(`✅ [SCHEDULE SENT] Successfully delivered to: ${task.target}`);
                     }
                 } catch (err) {
-                    console.error(`❌ [SEND FAIL] ${task.target}:`, err.message);
+                    console.error(`❌ [SCHEDULE FAILED] ${task.target}:`, err.message);
                 } finally {
                     inFlightTasks.delete(taskId);
                 }
             }
         } catch (err) {
-            console.error('[SCHEDULER LOOP ERROR]:', err.message);
+            console.error('[SCHEDULER ENGINE ERROR]:', err.message);
         }
     }, 15000);
 }
 
-module.exports = { Schedule, startSchedulerEngine, getSLTime, getSLTimeAndDate, normalizeTime };
+module.exports = { 
+    Schedule, 
+    startSchedulerEngine, 
+    getSLTime, 
+    getSLTimeAndDate, 
+    normalizeTime 
+};
