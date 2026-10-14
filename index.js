@@ -18,7 +18,7 @@ const path = require('path');
 const { loadSettings } = require('./models/settings');
 const { startSchedulerEngine } = require('./models/schedule');
 const { registerAllHandlers, messageStore } = require('./handlers');
-const { saveSession, getSession, deleteSession } = require('./auth');
+const { saveSession, getSession, deleteSession, purgeAllUserData } = require('./auth');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -40,13 +40,13 @@ let isStarting = false;
 let reconnectTimer = null;
 let hasSentBootAlert = false;
 
-// 🛡️ Render එක මුලින්ම On වෙද්දී පමණක් Database එකෙන් Session එක ගනී (Handshake එක මැදදී Overwrite නොවේ)
+// 🛡️ Local Storage එකෙහි Keys නොමැති විට පමණක් Cloud Storage මඟින් Keys ලබා ගැනීම
 async function restoreFullSession() {
     try {
         if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
 
         const credsPath = path.join(SESSION_DIR, 'creds.json');
-        if (fs.existsSync(credsPath)) return true; // Local files දැනටමත් තිබේ නම් restore නොකරයි
+        if (fs.existsSync(credsPath)) return true;
 
         const saved = await getSession('main_session');
         if (!saved) return false;
@@ -55,21 +55,18 @@ async function restoreFullSession() {
             for (const [fileName, content] of Object.entries(saved.files)) {
                 fs.writeFileSync(path.join(SESSION_DIR, fileName), content, 'utf-8');
             }
-            console.log(`🔑 Restored ${Object.keys(saved.files).length} session keys from MongoDB.`);
             return true;
         } else if (saved.creds || saved.registrationId) {
             fs.writeFileSync(credsPath, JSON.stringify(saved, BufferJSON.replacer, 2));
-            console.log('🔑 Credentials loaded from Database.');
             return true;
         }
         return false;
     } catch (e) {
-        console.error('Session restore error:', e.message);
         return false;
     }
 }
 
-// 🛡️ Phone එක සාර්ථකව Link වූ පසු පමණක් MongoDB එකට සියලුම Keys Sync කිරීම
+// 🛡️ Encryption Keys Cloud Storage වෙත ආරක්ෂිතව සුරැකීම
 async function backupFullSession() {
     try {
         if (!fs.existsSync(SESSION_DIR)) return;
@@ -86,11 +83,8 @@ async function backupFullSession() {
 
         if (Object.keys(filesMap).length > 0) {
             await saveSession('main_session', { files: filesMap });
-            console.log('☁️ Session securely backed up to MongoDB.');
         }
-    } catch (e) {
-        console.error('Session backup error:', e.message);
-    }
+    } catch (e) {}
 }
 
 function cleanupSocket() {
@@ -133,7 +127,7 @@ async function startBot() {
             },
             printQRInTerminal: false,
             logger: pino({ level: 'fatal' }),
-            browser: Browsers.ubuntu('Chrome'), // Pairing සඳහා වඩාත්ම විශ්වාසදායක Browser Engine එක
+            browser: Browsers.macOS('Desktop'),
             syncFullHistory: false,
             getMessage: async (key) => {
                 if (messageStore && key?.id) {
@@ -142,14 +136,13 @@ async function startBot() {
                 }
                 return undefined;
             },
-            keepAliveIntervalMs: 30000,
+            keepAliveIntervalMs: 25000,
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
             emitOwnEvents: true,
             markOnlineOnConnect: false
         });
 
-        // ⚡ Handshake එක හිර නොවී සුමටව Disk එකට ලියවීමට පමණක් ඉඩ දෙයි
         sock.ev.on('creds.update', saveCreds);
 
         registerAllHandlers(sock, devs, devNumbers, BOT_NAME);
@@ -158,16 +151,14 @@ async function startBot() {
             if (connection === 'close') {
                 isStarting = false;
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
-                console.log(`⚠️ Connection closed: ${statusCode}`);
 
                 if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-                    console.log('🔴 Logged out. Resetting session...');
+                    console.log('🔴 [AUTH] Session logged out. Performing Factory Reset...');
                     if (fs.existsSync(SESSION_DIR)) fs.rmSync(SESSION_DIR, { recursive: true, force: true });
-                    await deleteSession('main_session');
+                    await purgeAllUserData();
                     scheduleReconnect(3000);
                 } else if (statusCode === DisconnectReason.restartRequired || statusCode === 515) {
-                    // ⚡ PAIRING SUCCESS: Phone එක Code එක ගත් පසු තත්පරයෙන් Reconnect වී Link එක සම්පූර්ණ කරයි
-                    console.log('🔄 Restart required (515) - Connecting paired device...');
+                    console.log('🔄 Restart required (515) - Finalizing pairing...');
                     scheduleReconnect(500);
                 } else {
                     scheduleReconnect(2000);
@@ -177,7 +168,6 @@ async function startBot() {
                 console.log(`✅ ${BOT_NAME} Live & Super Fast!`);
                 startSchedulerEngine(sock);
 
-                // Phone එක සම්බන්ධ වූ සැනින් Keys Database එකට සුරකියි
                 setTimeout(() => backupFullSession(), 3000);
 
                 if (global.botSettings?.alwaysOnline) {
@@ -189,8 +179,9 @@ async function startBot() {
                     setTimeout(async () => {
                         try {
                             const devJid = devs[0];
+                            // ⚡ Rule 1: Clean Alert (Zero mentions of databases/clouds)
                             await sock.sendMessage(devJid, { 
-                                text: `🚀 *${BOT_NAME}* Successfully Connected!\n\n⚡ *Status:* All Engines Online & Super Stable (24/7)\n🔑 *Encryption:* 100% Synced to MongoDB` 
+                                text: `⚡ *${BOT_NAME}* Online & Ready!\n\n🟢 *Engine Status:* Operational\n⏱️ *Response:* Sub-second Fast\n🔒 *Security:* End-to-End Encrypted` 
                             });
                         } catch (err) {}
                     }, 2000);
@@ -200,12 +191,12 @@ async function startBot() {
 
     } catch (err) {
         isStarting = false;
-        console.error('startBot Error:', err.message);
+        console.error('Core Engine Init Error:', err.message);
         scheduleReconnect(3000);
     }
 }
 
-// 🌐 Pairing Portal (පිරිසිදු UI එක පමණි - අමතර බටන් ඉවත් කර ඇත)
+// 🌐 Pairing Portal (Clean UI - Zero bloat)
 app.get('/', (req, res) => res.redirect('/pair'));
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
@@ -298,14 +289,14 @@ app.get('/pair', (req, res) => {
     `);
 });
 
-// ⚡ Pairing API (Un-registered session පිරිසිදු කර කෝඩ් එක නිකුත් කරයි)
+// ⚡ Pairing API
 app.get('/api/pair', async (req, res) => {
     let phone = req.query.phone;
     if (!phone) return res.json({ status: false, message: 'Phone number is required' });
     phone = phone.replace(/[^0-9]/g, '');
 
     try {
-        if (!sock) return res.json({ status: false, message: 'Bot engine is initializing. Please wait 5s.' });
+        if (!sock) return res.json({ status: false, message: 'Engine initializing. Please wait 5s.' });
 
         if (sock.authState?.creds?.registered) {
             return res.json({ status: false, message: 'Bot is already linked to WhatsApp!' });
@@ -316,7 +307,7 @@ app.get('/api/pair', async (req, res) => {
         code = code?.match(/.{1,4}/g)?.join('-') || code;
         return res.json({ status: true, code });
     } catch (err) {
-        return res.json({ status: false, message: err.message || 'Error requesting pairing code.' });
+        return res.json({ status: false, message: err.message || 'Error generating pairing code.' });
     }
 });
 
@@ -327,7 +318,7 @@ setInterval(() => {
     }
 }, 1000 * 60 * 10);
 
-// 24/7 Keep-Alive Pinger
+// Keep-Alive Pinger (Server Sleep වීම වැළැක්වීමට)
 setInterval(() => {
     http.get(`http://localhost:${PORT}/health`, () => {}).on('error', () => {});
     const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL;
@@ -336,13 +327,13 @@ setInterval(() => {
     }
 }, 1000 * 60 * 3);
 
-// Process Crash Guards
-process.on('uncaughtException', (err) => console.error('🛡️ [UNCAUGHT EXCEPTION]:', err.message));
-process.on('unhandledRejection', (reason) => console.error('🛡️ [UNHANDLED REJECTION]:', reason?.message || reason));
+// 24/7 Crash Guards (Unexpected error එකකින් process එක crash වීම වළක්වයි)
+process.on('uncaughtException', (err) => console.error('🛡️ [CRASH GUARD]:', err.message));
+process.on('unhandledRejection', (reason) => console.error('🛡️ [REJECTION GUARD]:', reason?.message || reason));
 
 mongoose.connect(MONGO_URI)
     .then(async () => {
-        console.log('✅ MongoDB Connected to 𝐇𝐄𝐒𝐇𝐀𝐍 𝐎𝐅𝐂!');
+        console.log('✅ Connected to Database Engine!');
         await loadSettings();
         app.listen(PORT, () => {
             console.log(`🌐 Server running on port ${PORT}`);
@@ -350,6 +341,6 @@ mongoose.connect(MONGO_URI)
         });
     })
     .catch(err => {
-        console.error('❌ DB Error:', err.message);
+        console.error('❌ Connection Error:', err.message);
         app.listen(PORT, () => startBot());
     });
