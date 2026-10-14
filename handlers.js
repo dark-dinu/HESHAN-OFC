@@ -14,17 +14,22 @@ if (fs.existsSync(commandsDir)) {
     fs.readdirSync(commandsDir).forEach(file => {
         if (file.endsWith('.js')) {
             try {
-                const cmd = require(path.join(commandsDir, file));
-                if (cmd.name) commands.set(cmd.name.toLowerCase(), cmd);
+                const filePath = path.join(commandsDir, file);
+                delete require.cache[require.resolve(filePath)]; // Clear cache
+                const cmd = require(filePath);
+                const name = cmd.name || cmd.pattern || cmd.cmd;
+                if (name) commands.set(name.toLowerCase(), cmd);
                 if (cmd.aliases && Array.isArray(cmd.aliases)) {
                     cmd.aliases.forEach(alias => commands.set(alias.toLowerCase(), cmd));
                 }
             } catch (e) {
-                console.error(`Failed to preload [${file}]:`, e.message);
+                console.error(`❌ Failed to preload [${file}]:`, e.message);
             }
         }
     });
     console.log(`⚡ [ENGINE] Pre-loaded ${commands.size} commands into RAM!`);
+} else {
+    console.warn(`⚠️ [WARNING] Commands directory not found at: ${commandsDir}`);
 }
 
 // 🛡️ High-Performance Memory Stores
@@ -41,7 +46,7 @@ const MAX_MEDIA_STORE = 10;
 async function downloadMedia(content, type) {
     try {
         if (!content) return null;
-        if (content.fileLength && Number(content.fileLength) > 8 * 1024 * 1024) return null;
+        if (content.fileLength && Number(content.fileLength) > 15 * 1024 * 1024) return null;
 
         const stream = await downloadContentFromMessage(content, type);
         let buffer = Buffer.from([]);
@@ -52,7 +57,7 @@ async function downloadMedia(content, type) {
     }
 }
 
-// 🛡️ Universal Message Unwrapper (deviceSentMessage ඇතුළු සියලුම Wrappers Unpack කරයි)
+// 🛡️ Universal Message Unwrapper
 function unwrapMessage(msg) {
     let m = msg;
     if (!m) return null;
@@ -83,6 +88,9 @@ function extractMessageText(m) {
            m.imageMessage?.caption || 
            m.videoMessage?.caption || 
            m.documentMessage?.caption || 
+           m.buttonsResponseMessage?.selectedButtonId ||
+           m.listResponseMessage?.singleSelectReply?.selectedRowId ||
+           m.templateButtonReplyMessage?.selectedId ||
            '';
 }
 
@@ -113,7 +121,10 @@ const validSettingNumbers = [
 
 const ANTI_CALL_AUDIO = 'https://files.catbox.moe/osl5lm.ogg';
 
-function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
+function registerAllHandlers(sock, devs = [], devNumbers = [], BOT_NAME = 'HESHAN OFC') {
+
+    // Clean Dev Numbers Array
+    const safeDevNumbers = (devNumbers || []).map(n => String(n).replace(/[^0-9]/g, ''));
 
     // 📞 1. Anti-Call Engine
     sock.ev.on('call', async (callEvents) => {
@@ -124,7 +135,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
                 const callerJid = call.from;
                 const cleanCaller = callerJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
 
-                if (devNumbers.includes(cleanCaller) || devs.includes(callerJid)) continue;
+                if (safeDevNumbers.includes(cleanCaller) || devs.includes(callerJid)) continue;
 
                 try {
                     await sock.rejectCall(call.id, call.from);
@@ -150,7 +161,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         const originChat = cached.key.remoteJid;
 
         const destMode = global.botSettings?.antiSendDest || 'me';
-        const sendTarget = (destMode === 'from') ? originChat : devs[0];
+        const sendTarget = (destMode === 'from') ? originChat : (devs[0] || originChat);
 
         const alertText = `🚮 *Deleted Message Recovered!*\n👤 *From:* +${senderNum}\n📍 *Chat:* ${originChat.endsWith('@g.us') ? 'Group' : 'Inbox'}`;
 
@@ -230,7 +241,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
     });
 
     // 📩 5. Main Messages Upsert Handler
-    sock.ev.on('messages.upsert', async ({ messages }) => {
+    sock.ev.on('messages.upsert', async ({ messages, type: upsertType }) => {
         if (!messages || messages.length === 0) return;
 
         for (const msg of messages) {
@@ -240,23 +251,24 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             if (msgId) {
                 if (processedMessageIds.has(msgId)) continue;
                 processedMessageIds.add(msgId);
-                if (processedMessageIds.size > 200) {
+                if (processedMessageIds.size > 300) {
                     const first = processedMessageIds.values().next().value;
                     processedMessageIds.delete(first);
                 }
             }
 
             const isMe = Boolean(msg.key.fromMe);
-            let remoteJid = msg.key.remoteJid || '';
+            const remoteJid = msg.key.remoteJid || '';
 
-            // BOT Phone JID එක ලබා ගැනීම
-            const botNumber = sock.user?.id ? sock.user.id.split(':')[0].split('@')[0].replace(/[^0-9]/g, '') : '';
-            const botJid = botNumber ? `${botNumber}@s.whatsapp.net` : devs[0];
+            // BOT Phone Info
+            const botRawId = sock.user?.id || '';
+            const botNumber = botRawId.split(':')[0].split('@')[0].replace(/[^0-9]/g, '');
+            const botJid = botNumber ? `${botNumber}@s.whatsapp.net` : (devs[0] || remoteJid);
 
-            // Self-Chat (@lid) එකක් නම් botJid එකට Map කිරීම
+            // Message Reply Target (Fix: Keep group JID intact, fix direct self-chat lid)
             let targetReplyJid = remoteJid;
-            if (remoteJid.includes('@lid') || (isMe && !remoteJid.endsWith('@g.us'))) {
-                targetReplyJid = botJid;
+            if (remoteJid.endsWith('@lid') && !remoteJid.endsWith('@g.us')) {
+                targetReplyJid = isMe ? botJid : (msg.key.participant || remoteJid);
             }
 
             // Protocol Revoke (Anti-delete)
@@ -300,7 +312,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
             const cleanJid = cleanSender ? `${cleanSender}@s.whatsapp.net` : '';
 
             const isDev = isMe || 
-                          devNumbers.includes(cleanSender) || 
+                          safeDevNumbers.includes(cleanSender) || 
                           devs.includes(cleanJid) ||
                           devs.includes(rawSender) ||
                           (cleanSender && cleanSender === botNumber);
@@ -323,7 +335,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
                         const buffer = await downloadMedia(viewOnce[targetKey], mediaType);
                         if (buffer) {
                             const destMode = global.botSettings?.antiSendDest || 'me';
-                            const sendTarget = (destMode === 'from') ? targetReplyJid : devs[0];
+                            const sendTarget = (destMode === 'from') ? targetReplyJid : (devs[0] || targetReplyJid);
 
                             const infoHeader = `👁️‍🗨️ *Anti View-Once Captured!*\n\n👤 *From:* ${msg.pushName || cleanSender} (+${cleanSender})\n📝 *Caption:* ${viewOnce[targetKey]?.caption || 'None'}`;
                             if (mediaType === 'image') sock.sendMessage(sendTarget, { image: buffer, caption: infoHeader }).catch(() => {});
@@ -337,7 +349,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
                 }
             }
 
-            // Mode Filters
+            // Mode Filters (Only filter if setting is explicitly active)
             if (global.botSettings?.mode === 'private' && !isDev) continue;
             if (global.botSettings?.mode === 'group' && !remoteJid.endsWith('@g.us') && !isDev) continue;
 
@@ -372,7 +384,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
                         sock.sendMessage(targetReplyJid, { react: { text: '😼', key: msg.key } }).catch(() => {});
                         const buffer = await downloadMedia(target.videoMessage, 'video');
                         if (buffer) {
-                            await sock.sendMessage(targetReplyJid, { video: buffer, caption: target.videoMessage.caption || `📥 *Status Saved by ${BOT_NAME}*` }, { quoted: isMe ? undefined : msg });
+                            await sock.sendMessage(targetReplyJid, { video: buffer, caption: target.videoMessage.caption || `📥 *Status Saved by ${BOT_NAME}*` }, { quoted: msg });
                             await sock.sendMessage(targetReplyJid, { react: { text: '😹', key: msg.key } });
                             continue;
                         }
@@ -380,14 +392,14 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
                         sock.sendMessage(targetReplyJid, { react: { text: '😼', key: msg.key } }).catch(() => {});
                         const buffer = await downloadMedia(target.imageMessage, 'image');
                         if (buffer) {
-                            await sock.sendMessage(targetReplyJid, { image: buffer, caption: target.imageMessage.caption || `📥 *Status Saved by ${BOT_NAME}*` }, { quoted: isMe ? undefined : msg });
+                            await sock.sendMessage(targetReplyJid, { image: buffer, caption: target.imageMessage.caption || `📥 *Status Saved by ${BOT_NAME}*` }, { quoted: msg });
                             await sock.sendMessage(targetReplyJid, { react: { text: '😹', key: msg.key } });
                             continue;
                         }
                     } else if (target.conversation || target.extendedTextMessage) {
                         const statusText = (target.conversation || target.extendedTextMessage?.text || '').trim();
                         if (statusText) {
-                            await sock.sendMessage(targetReplyJid, { text: `📝 *Status Text:*\n\n${statusText}` }, { quoted: isMe ? undefined : msg });
+                            await sock.sendMessage(targetReplyJid, { text: `📝 *Status Text:*\n\n${statusText}` }, { quoted: msg });
                             await sock.sendMessage(targetReplyJid, { react: { text: '✅', key: msg.key } });
                             continue;
                         }
@@ -395,7 +407,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
                 }
             }
 
-            // Song Reply Selector (1, 2, 3)
+            // Song Reply Selector
             if (['1', '2', '3', '1️⃣', '2️⃣', '3️⃣'].includes(text) && quotedMsg) {
                 const songCmd = commands.get('song');
                 if (songCmd && typeof songCmd.handleReply === 'function') {
@@ -404,7 +416,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
                 }
             }
 
-            // Setting Shortcuts (1.1, 10.1 ආදී)
+            // Setting Shortcuts
             if (isDev && validSettingNumbers.includes(text.toLowerCase())) {
                 const settingCmd = commands.get('setting');
                 if (settingCmd) {
@@ -413,15 +425,14 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
                 }
             }
 
-            // ⚡ FAST COMMAND ROUTER
-            if (!text.startsWith('.')) continue;
-            const args = text.slice(1).trim().split(/ +/);
+            // ⚡ FAST COMMAND ROUTER (Prefix check)
+            const prefix = '.';
+            if (!text.startsWith(prefix)) continue;
+
+            const args = text.slice(prefix.length).trim().split(/ +/);
             const commandName = args.shift().toLowerCase();
 
-            // Self-quote ආරක්ෂාව (WhatsApp protocol crash වීම වළක්වයි)
-            const safeQuote = isMe ? undefined : msg;
-
-            // 🚀 Built-in Ping (Ultra-Fast)
+            // 🚀 Built-in Ping
             if (commandName === 'ping' || commandName === 'p' || commandName === 'speed') {
                 const start = performance.now();
                 await sock.sendPresenceUpdate('composing', targetReplyJid).catch(() => {});
@@ -432,33 +443,40 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
                 sock.sendMessage(targetReplyJid, { react: { text: '⚡', key: msg.key } }).catch(() => {});
                 await sock.sendMessage(targetReplyJid, { 
                     text: `*✗ ${BOT_NAME} ❬${latency}𝘮𝘴❭ 📍*` 
-                }, { quoted: safeQuote });
+                }, { quoted: msg });
                 continue;
             }
 
-            // 🚀 Built-in Alive (Ultra-Fast)
+            // 🚀 Built-in Alive
             if (commandName === 'alive' || commandName === 'bot') {
                 sock.sendMessage(targetReplyJid, { react: { text: '👤', key: msg.key } }).catch(() => {});
                 const aliveText = `👨🏻‍💻⃝➥❬ ʜᴇꜱʜᴀɴ ᴏꜰᴄ ❭\n\n> *➥ɴᴀᴍᴇ ◅◇▻ ${BOT_NAME} 👑*\n> *➥ꜰʀᴏᴍ ◅◇▻ 𝐄𝐌𝐁𝐈𝐋𝐈𝐏𝐈𝐓𝐈𝐘𝐀 ☘️*\n> *➥ᴀɢᴇ   ◅◇▻ 18 📍*\n> *➥ɢᴇɴᴅᴇʀ ◅◇▻ 𝐁𝐎𝐘 👤*\n\n> *❬“Talk is cheap. I write code that speaks for itself.”❭*\n\n*© ${BOT_NAME} 2026 𝐔𝐏𝐃𝐀𝐓𝐄 ❄️*`;
 
                 const logoPath = path.join(__dirname, 'logo.jpg');
                 if (fs.existsSync(logoPath)) {
-                    await sock.sendMessage(targetReplyJid, { image: fs.readFileSync(logoPath), caption: aliveText }, { quoted: safeQuote });
+                    await sock.sendMessage(targetReplyJid, { image: fs.readFileSync(logoPath), caption: aliveText }, { quoted: msg });
                 } else {
-                    await sock.sendMessage(targetReplyJid, { text: aliveText }, { quoted: safeQuote });
+                    await sock.sendMessage(targetReplyJid, { text: aliveText }, { quoted: msg });
                 }
                 continue;
             }
 
-            // /commands ෆෝල්ඩරයේ ඇති අදාළ Command එක Run කිරීම
+            // Execute Custom Command from /commands folder
             const cmd = commands.get(commandName);
             if (cmd) {
                 try {
-                    console.log(`⚡ [EXEC] .${commandName} triggered by ${cleanSender || 'Owner'}`);
-                    await cmd.execute(sock, msg, args, isDev, BOT_NAME, cleanSender || botNumber, commandName);
+                    console.log(`⚡ [EXEC] .${commandName} triggered by ${cleanSender || 'Me'}`);
+                    const runFn = cmd.execute || cmd.start || cmd.run;
+                    if (typeof runFn === 'function') {
+                        await runFn(sock, msg, args, isDev, BOT_NAME, cleanSender || botNumber, commandName);
+                    } else {
+                        console.error(`⚠️ Command [${commandName}] has no valid execute/start/run function.`);
+                    }
                 } catch (err) {
-                    console.error(`Command [${commandName}] failed:`, err.message);
+                    console.error(`❌ Command [${commandName}] failed:`, err.message);
                 }
+            } else {
+                console.log(`ℹ️ Command .${commandName} not found in preloaded commands.`);
             }
         }
     });
