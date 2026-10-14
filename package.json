@@ -4,7 +4,7 @@
   "description": "Super Fast WhatsApp Bot 2026",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node --max-old-space-size=460 index.js"
   },
   "engines": {
     "node": ">=18"
