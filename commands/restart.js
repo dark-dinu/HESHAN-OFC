@@ -1,28 +1,36 @@
 module.exports = {
     name: 'restart',
+    aliases: ['reboot', 'reload'],
     execute: async (sock, msg, args, isDev, BOT_NAME, cleanSender) => {
-        const chatJid = msg.key.remoteJid;
+        const chatJid = msg.key?.remoteJid;
+        if (!chatJid) return;
 
-        // 🔒 Bot Owner / Developer Guard
+        // 🔒 Developer Guard
         if (!isDev) {
             return sock.sendMessage(chatJid, { 
-                text: '❌ *Access Denied!* Only Developers can restart the bot.' 
+                text: '❌ *Access Denied!* Only Developers can restart the engine.' 
             }, { quoted: msg });
         }
 
-        // Reaction එක දැමීම
-        sock.sendMessage(chatJid, { react: { text: '🔄', key: msg.key } }).catch(() => {});
+        try {
+            sock.sendMessage(chatJid, { react: { text: '🔄', key: msg.key } }).catch(() => {});
 
-        // Restarting Message එක යැවීම
-        await sock.sendMessage(chatJid, { 
-            text: `🔄 *Restarting ${BOT_NAME}...*\n\n⚡ _Clearing RAM cache and rebooting all engines..._` 
-        }, { quoted: msg });
+            await sock.sendMessage(chatJid, { 
+                text: `🔄 *Restarting ${BOT_NAME}...*\n\n⚡ _Clearing memory buffers and rebooting all systems..._` 
+            }, { quoted: msg });
 
-        console.log(`⚠️ [RESTART] Triggered by Developer: ${cleanSender}`);
+            console.log(`⚠️ [RESTART] Triggered by: ${cleanSender}`);
 
-        // Message එක send වී අවසන් වීමට තත්පර 1.5ක delay එකක් තබා Process එක Exit කිරීම
-        setTimeout(() => {
-            process.exit(0); // Render / Hosting සේවාව මඟින් බොට්ව ක්ෂණිකව Reboot කරවයි
-        }, 1500);
+            // පණිවිඩය WhatsApp සර්වර් වෙත ගිය පසු සුමටව reboot වීම
+            setTimeout(() => {
+                process.exit(0);
+            }, 1200);
+
+        } catch (err) {
+            console.error('[RESTART ERROR]:', err.message);
+            return sock.sendMessage(chatJid, { 
+                text: '❌ Failed to initiate restart sequence.' 
+            }, { quoted: msg });
+        }
     }
 };
