@@ -5,14 +5,19 @@ const { updateSetting } = require('../models/settings');
 let logoBuffer = null;
 const logoPath = path.join(__dirname, '../logo.jpg');
 if (fs.existsSync(logoPath)) {
-    logoBuffer = fs.readFileSync(logoPath);
+    try {
+        logoBuffer = fs.readFileSync(logoPath);
+    } catch (e) {
+        logoBuffer = null;
+    }
 }
 
 module.exports = {
     name: 'setting',
     aliases: ['settings', 'config'],
     execute: async (sock, msg, args, isDev, BOT_NAME, cleanSender) => {
-        const chatJid = msg.key.remoteJid;
+        const chatJid = msg.key?.remoteJid;
+        if (!chatJid) return;
 
         if (!isDev) {
             return sock.sendMessage(chatJid, { 
@@ -21,8 +26,8 @@ module.exports = {
         }
 
         const action = args[0]?.toLowerCase();
-        const current = global.botSettings;
-        const status = (val) => val ? '✔️' : '❌';
+        const current = global.botSettings || {};
+        const status = (val) => val ? '❤️' : '💔';
         const currentDest = (current.antiSendDest || 'me').toUpperCase();
 
         if (!action) {
@@ -46,7 +51,7 @@ module.exports = {
 
 *2.1  ➥ ᴩʀɪᴠᴀᴛᴇ  👤*
 *2.2  ➥ ᴩᴜʙʟɪᴄ 👥*
-*2.3  ➥ ɢʀᴏᴜᴩ 🗣️* [${current.mode?.toUpperCase()}]
+*2.3  ➥ ɢʀᴏᴜᴩ 🗣️* [${(current.mode || 'PUBLIC').toUpperCase()}]
 
 3️⃣ *𝐀𝐔𝐓𝐎 𝐕𝐎𝐈𝐂𝐄 🎙️*
 
@@ -148,7 +153,7 @@ _(Chat Messages Auto Read / Blue Tick)_
         await updateSetting(target[0], target[1]);
 
         if (target[0] === 'alwaysOnline') {
-            await sock.sendPresenceUpdate(target[1] ? 'available' : 'unavailable');
+            await sock.sendPresenceUpdate(target[1] ? 'available' : 'unavailable').catch(() => {});
         }
 
         return sock.sendMessage(chatJid, { 
