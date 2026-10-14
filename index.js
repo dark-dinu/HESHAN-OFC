@@ -40,34 +40,37 @@ let isStarting = false;
 let reconnectTimer = null;
 let hasSentBootAlert = false;
 
-// 🛡️ සියලුම Encryption Keys (Pre-keys, Sessions) Database එකෙන් Restore කිරීම
+// 🛡️ Local Folder එකේ creds නැතිනම් පමණක් MongoDB එකෙන් Restore කරයි (Overwrite වීම් 100% වළක්වයි)
 async function restoreFullSession() {
     try {
         if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
+
+        const credsPath = path.join(SESSION_DIR, 'creds.json');
+        // Local creds දැනටමත් තිබේ නම් restore නොකරයි
+        if (fs.existsSync(credsPath)) return true;
+
         const saved = await getSession('main_session');
         if (!saved) return false;
 
-        // සම්පූර්ණ Multi-Key bundle එකක් තිබේ නම්
         if (saved.files && typeof saved.files === 'object') {
             for (const [fileName, content] of Object.entries(saved.files)) {
                 fs.writeFileSync(path.join(SESSION_DIR, fileName), content, 'utf-8');
             }
-            console.log(`🔑 Restored ${Object.keys(saved.files).length} session encryption keys from Database.`);
+            console.log(`🔑 Restored ${Object.keys(saved.files).length} session keys from MongoDB.`);
             return true;
-        } else {
-            // තනි creds.json එකක් පමණක් තිබේ නම්
-            const credsPath = path.join(SESSION_DIR, 'creds.json');
+        } else if (saved.creds || saved.registrationId) {
             fs.writeFileSync(credsPath, JSON.stringify(saved, BufferJSON.replacer, 2));
             console.log('🔑 Credentials loaded from Database.');
             return true;
         }
+        return false;
     } catch (e) {
         console.error('Session restore error:', e.message);
         return false;
     }
 }
 
-// 🛡️ සියලුම Encryption Keys (Session Folder එකම) Database එකට Backup කිරීම
+// 🛡️ සියලුම Encryption Keys Database එකට Realtime Backup කිරීම
 async function backupFullSession() {
     try {
         if (!fs.existsSync(SESSION_DIR)) return;
@@ -119,7 +122,6 @@ async function startBot() {
     cleanupSocket();
 
     try {
-        // Render එක restart වුවද සියලුම Signal Ratchet Keys පෙර පරිදිම ගොඩනැගීම
         await restoreFullSession();
 
         const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
@@ -131,9 +133,9 @@ async function startBot() {
             },
             printQRInTerminal: false,
             logger: pino({ level: 'fatal' }),
-            browser: Browsers.ubuntu('Chrome'),
+            // ⚡ Pairing Code එක ක්ෂණිකව Accept වන Browser Identifier එක
+            browser: Browsers.macOS('Desktop'),
             syncFullHistory: false,
-            // ⚡ E2EE Retry Resolver (Waiting for this message දෝෂය සම්පූර්ණයෙන්ම වළක්වයි)
             getMessage: async (key) => {
                 if (messageStore && key?.id) {
                     const cached = messageStore.get(key.id);
@@ -141,24 +143,18 @@ async function startBot() {
                 }
                 return undefined;
             },
-            keepAliveIntervalMs: 20000,
-            connectTimeoutMs: 45000,
+            keepAliveIntervalMs: 25000,
+            connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
             retryRequestDelayMs: 250,
             emitOwnEvents: true,
             markOnlineOnConnect: false
         });
 
-        // Keys Auto-Sync Debounce (සෑම Encryption Key වෙනසක්ම MongoDB එකට Sync වේ)
-        let credsTimeout = null;
+        // ⚡ Creds Update වූ සැනින් Disk එකට සහ Database එකට වහාම Save වේ
         sock.ev.on('creds.update', async () => {
             await saveCreds();
-            if (!credsTimeout) {
-                credsTimeout = setTimeout(async () => {
-                    await backupFullSession();
-                    credsTimeout = null;
-                }, 8000);
-            }
+            await backupFullSession();
         });
 
         registerAllHandlers(sock, devs, devNumbers, BOT_NAME);
@@ -170,24 +166,28 @@ async function startBot() {
                 console.log(`⚠️ Connection closed: ${statusCode}`);
 
                 if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
+                    console.log('🔴 Session logged out. Purging session...');
                     if (fs.existsSync(SESSION_DIR)) fs.rmSync(SESSION_DIR, { recursive: true, force: true });
                     await deleteSession('main_session');
                     scheduleReconnect(3000);
                 } else if (statusCode === DisconnectReason.restartRequired || statusCode === 515) {
-                    scheduleReconnect(500);
+                    // ⚡ PAIRING SUCCESS RESTART: අලුත් Keys තහවුරු කරගෙන 100ms වලින් නැවත Connect වීම
+                    console.log('🔄 Restart required (515) - Completing pairing handshake...');
+                    await backupFullSession();
+                    scheduleReconnect(300);
                 } else if (statusCode === 440 || statusCode === DisconnectReason.connectionReplaced) {
                     cleanupSocket();
                     scheduleReconnect(3000);
                 } else {
-                    scheduleReconnect(1000);
+                    scheduleReconnect(1500);
                 }
             } else if (connection === 'open') {
                 isStarting = false;
                 console.log(`✅ ${BOT_NAME} Live & Super Fast!`);
                 startSchedulerEngine(sock);
 
-                // Initial handshake keys cloud backup
-                setTimeout(() => backupFullSession(), 4000);
+                // Handshake එක සාර්ථක වූ සැනින් MongoDB එකට Keys Sync කිරීම
+                await backupFullSession();
 
                 if (global.botSettings?.alwaysOnline) {
                     sock.sendPresenceUpdate('available').catch(() => {});
@@ -199,7 +199,7 @@ async function startBot() {
                         try {
                             const devJid = devs[0];
                             await sock.sendMessage(devJid, { 
-                                text: `🚀 *${BOT_NAME}* Successfully Connected!\n\n⚡ *Status:* All Engines Online & Super Stable (24/7)\n⏰ *Scheduler:* Active (Asia/Colombo)\n🔑 *Encryption:* 100% Synced to MongoDB` 
+                                text: `🚀 *${BOT_NAME}* Successfully Connected!\n\n⚡ *Status:* All Engines Online & Super Stable (24/7)\n🔑 *Encryption:* 100% Synced to MongoDB` 
                             });
                         } catch (err) {}
                     }, 2000);
@@ -209,11 +209,14 @@ async function startBot() {
 
     } catch (err) {
         isStarting = false;
+        console.error('startBot Error:', err.message);
         scheduleReconnect(3000);
     }
 }
 
-// 🌐 Pairing Portal
+// ==========================================
+// 🌐 PAIRING PORTAL (With Reset Support)
+// ==========================================
 app.get('/', (req, res) => res.redirect('/pair'));
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
@@ -237,6 +240,8 @@ app.get('/pair', (req, res) => {
             button { width: 100%; padding: 15px; border: none; border-radius: 12px; background: #00e676; color: #000; font-size: 15px; font-weight: 700; cursor: pointer; transition: 0.2s; }
             button:hover { background: #00c853; transform: translateY(-1px); }
             button:disabled { background: #444; color: #888; cursor: not-allowed; }
+            .btn-reset { background: rgba(255, 68, 68, 0.15); border: 1px solid rgba(255, 68, 68, 0.3); color: #ff5252; margin-top: 15px; padding: 12px; }
+            .btn-reset:hover { background: rgba(255, 68, 68, 0.3); color: #fff; }
             #resultBox { margin-top: 25px; display: none; }
             .code-display { background: rgba(0, 230, 118, 0.08); border: 2px dashed #00e676; padding: 15px; border-radius: 12px; font-size: 28px; font-weight: 700; letter-spacing: 4px; color: #00e676; cursor: pointer; user-select: all; }
             .error-box { background: rgba(255, 68, 68, 0.1); border: 1px solid rgba(255, 68, 68, 0.2); color: #ff5252; padding: 12px; border-radius: 10px; font-size: 13px; margin-top: 15px; display: none; }
@@ -254,6 +259,7 @@ app.get('/pair', (req, res) => {
                 <div class="code-display" id="codeText" onclick="copyCode()"></div>
                 <p style="font-size: 12px; color: #00e676; margin-top: 12px;">Enter this code on WhatsApp Linked Devices!</p>
             </div>
+            <button class="btn-reset" onclick="resetSession()">🔄 Reset Session (If Stuck)</button>
         </div>
         <script>
             async function getCode() {
@@ -295,6 +301,18 @@ app.get('/pair', (req, res) => {
                 }
             }
 
+            async function resetSession() {
+                if (!confirm("Are you sure you want to clear the old session and start fresh?")) return;
+                try {
+                    const res = await fetch('/api/reset-session');
+                    const d = await res.json();
+                    alert(d.message || "Session reset successfully!");
+                    location.reload();
+                } catch (e) {
+                    alert("Error resetting session: " + e.message);
+                }
+            }
+
             function copyCode() {
                 const text = document.getElementById('codeText').innerText;
                 navigator.clipboard.writeText(text);
@@ -306,6 +324,7 @@ app.get('/pair', (req, res) => {
     `);
 });
 
+// ⚡ Pairing API
 app.get('/api/pair', async (req, res) => {
     let phone = req.query.phone;
     if (!phone) return res.json({ status: false, message: 'Phone number is required' });
@@ -313,11 +332,12 @@ app.get('/api/pair', async (req, res) => {
 
     try {
         if (!sock) return res.json({ status: false, message: 'Bot engine is initializing. Please wait 5s.' });
+
         if (sock.authState?.creds?.registered) {
-            return res.json({ status: false, message: 'Bot is already linked to WhatsApp!' });
+            return res.json({ status: false, message: 'Bot is already linked to WhatsApp! Click "Reset Session" to re-link.' });
         }
 
-        await delay(1000);
+        await delay(1500);
         let code = await sock.requestPairingCode(phone);
         code = code?.match(/.{1,4}/g)?.join('-') || code;
         return res.json({ status: true, code });
@@ -326,7 +346,20 @@ app.get('/api/pair', async (req, res) => {
     }
 });
 
-// 🔄 24/7 Keep-Alive Pinger
+// 🔄 Clean Reset API (හිරවූ පරණ Keys ක්ෂණිකව මකා නැවුම්ව පටන් ගැනීම)
+app.get('/api/reset-session', async (req, res) => {
+    try {
+        cleanupSocket();
+        if (fs.existsSync(SESSION_DIR)) fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+        await deleteSession('main_session');
+        scheduleReconnect(1000);
+        return res.json({ status: true, message: 'Session cleaned! Ready for fresh pairing.' });
+    } catch (err) {
+        return res.json({ status: false, message: err.message });
+    }
+});
+
+// 24/7 Keep-Alive Pinger
 setInterval(() => {
     http.get(`http://localhost:${PORT}/health`, () => {}).on('error', () => {});
     const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL;
@@ -335,13 +368,9 @@ setInterval(() => {
     }
 }, 1000 * 60 * 3);
 
-// 🛡️ 24/7 Unhandled Process Crash Guards
-process.on('uncaughtException', (err) => {
-    console.error('🛡️ [UNCAUGHT EXCEPTION PREVENTED]:', err.message);
-});
-process.on('unhandledRejection', (reason) => {
-    console.error('🛡️ [UNHANDLED REJECTION PREVENTED]:', reason?.message || reason);
-});
+// Process Crash Guards
+process.on('uncaughtException', (err) => console.error('🛡️ [UNCAUGHT EXCEPTION]:', err.message));
+process.on('unhandledRejection', (reason) => console.error('🛡️ [UNHANDLED REJECTION]:', reason?.message || reason));
 
 mongoose.connect(MONGO_URI)
     .then(async () => {
