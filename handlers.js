@@ -2,10 +2,8 @@ const fs = require('fs');
 const path = require('path');
 const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
 
-// ⚡ RAM-First Pre-loaded Commands Map (Linux Case-Safe)
+// ⚡ RAM-First Pre-loaded Commands Map (Linux Case-Insensitive)
 const commands = new Map();
-
-// 'commands' හෝ 'Commands' ෆෝල්ඩර දෙකම Linux වල හඳුනාගැනීම
 let commandsDir = path.join(__dirname, 'commands');
 if (!fs.existsSync(commandsDir)) {
     commandsDir = path.join(__dirname, 'Commands');
@@ -26,8 +24,6 @@ if (fs.existsSync(commandsDir)) {
         }
     });
     console.log(`⚡ [ENGINE] Pre-loaded ${commands.size} commands into RAM!`);
-} else {
-    console.error('❌ [ERROR] Commands folder not found!');
 }
 
 // 🛡️ High-Performance Memory Stores
@@ -55,16 +51,27 @@ async function downloadMedia(content, type) {
     }
 }
 
-// 🛡️ Message Unwrapper
+// 🛡️ Universal Message Unwrapper (deviceSentMessage ඇතුළු සියලුම Wrappers Unpack කරයි)
 function unwrapMessage(msg) {
     let m = msg;
     if (!m) return null;
-    if (m.ephemeralMessage?.message) m = m.ephemeralMessage.message;
-    if (m.viewOnceMessage?.message) m = m.viewOnceMessage.message;
-    if (m.viewOnceMessageV2?.message) m = m.viewOnceMessageV2.message;
-    if (m.viewOnceMessageV2Extension?.message) m = m.viewOnceMessageV2Extension.message;
-    if (m.documentWithCaptionMessage?.message) m = m.documentWithCaptionMessage.message;
-    if (m.editedMessage?.message?.protocolMessage?.editedMessage) m = m.editedMessage.message.protocolMessage.editedMessage;
+    while (
+        m.ephemeralMessage?.message ||
+        m.viewOnceMessage?.message ||
+        m.viewOnceMessageV2?.message ||
+        m.viewOnceMessageV2Extension?.message ||
+        m.documentWithCaptionMessage?.message ||
+        m.deviceSentMessage?.message ||
+        m.editedMessage?.message?.protocolMessage?.editedMessage
+    ) {
+        m = m.ephemeralMessage?.message ||
+            m.viewOnceMessage?.message ||
+            m.viewOnceMessageV2?.message ||
+            m.viewOnceMessageV2Extension?.message ||
+            m.documentWithCaptionMessage?.message ||
+            m.deviceSentMessage?.message ||
+            m.editedMessage?.message?.protocolMessage?.editedMessage;
+    }
     return m;
 }
 
@@ -221,201 +228,198 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME) {
         }
     });
 
-    // 📩 Messages Upsert (⚡ 'notify' සහ 'append' දෙකම භාරගනී - Self/Owner Messages වැඩ කරයි!)
+    // 📩 Messages Upsert (තමන් විසින් යවන පණිවිඩ සහ අන් අයගේ පණිවිඩ සියල්ල එකසේ හඳුනාගනී)
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
-        // notify (අන් අයගේ මැසේජ්) හෝ append (තමන්ගේ Phone එකෙන්ම දාන මැසේජ්)
-        if (type !== 'notify' && type !== 'append') return;
+        if (!messages || messages.length === 0) return;
 
-        const msg = messages[0];
-        if (!msg || !msg.message) return;
+        for (const msg of messages) {
+            if (!msg || !msg.message) continue;
 
-        // Duplicate Message Guard
-        const msgId = msg.key?.id;
-        if (msgId) {
-            if (processedMessageIds.has(msgId)) return;
-            processedMessageIds.add(msgId);
-            if (processedMessageIds.size > 200) {
-                const first = processedMessageIds.values().next().value;
-                processedMessageIds.delete(first);
+            const msgId = msg.key?.id;
+            if (msgId) {
+                if (processedMessageIds.has(msgId)) continue;
+                processedMessageIds.add(msgId);
+                if (processedMessageIds.size > 200) {
+                    const first = processedMessageIds.values().next().value;
+                    processedMessageIds.delete(first);
+                }
             }
-        }
 
-        const remoteJid = msg.key.remoteJid || '';
+            const remoteJid = msg.key.remoteJid || '';
 
-        // Protocol Revoke (Anti-delete)
-        const protocolMsg = msg.message.protocolMessage;
-        if (protocolMsg && (protocolMsg.type === 0 || protocolMsg.type === 'REVOKE')) {
-            const deletedId = protocolMsg.key?.id;
-            if (deletedId) await recoverDeletedMessage(deletedId);
-            return;
-        }
+            // Protocol Revoke (Anti-delete)
+            const protocolMsg = msg.message.protocolMessage;
+            if (protocolMsg && (protocolMsg.type === 0 || protocolMsg.type === 'REVOKE')) {
+                const deletedId = protocolMsg.key?.id;
+                if (deletedId) await recoverDeletedMessage(deletedId);
+                continue;
+            }
 
-        // Status Broadcast
-        if (remoteJid === 'status@broadcast') {
+            // Status Broadcast
+            if (remoteJid === 'status@broadcast') {
+                if (msg.key?.id) {
+                    if (statusStore.size >= 30) statusStore.delete(statusStore.keys().next().value);
+                    statusStore.set(msg.key.id, msg);
+                }
+                if (global.botSettings?.autoSeen) sock.readMessages([msg.key]).catch(() => {});
+                if (global.botSettings?.autoReact) sock.sendMessage('status@broadcast', { react: { text: '💚', key: msg.key } }).catch(() => {});
+                continue;
+            }
+
+            // Auto Read (Blue Tick)
+            if (global.botSettings?.autoRead && !msg.key.fromMe) {
+                sock.readMessages([msg.key]).catch(() => {});
+            }
+
+            // Core Message Extraction (Unwrapping Nested Data)
+            const rawMsg = unwrapMessage(msg.message);
+            if (!rawMsg) continue;
+
+            // Cache for E2EE Retry and Anti-Delete
             if (msg.key?.id) {
-                if (statusStore.size >= 30) statusStore.delete(statusStore.keys().next().value);
-                statusStore.set(msg.key.id, msg);
-            }
-            if (global.botSettings?.autoSeen) sock.readMessages([msg.key]).catch(() => {});
-            if (global.botSettings?.autoReact) sock.sendMessage('status@broadcast', { react: { text: '💚', key: msg.key } }).catch(() => {});
-            return;
-        }
-
-        // Auto Read
-        if (global.botSettings?.autoRead && !msg.key.fromMe) {
-            sock.readMessages([msg.key]).catch(() => {});
-        }
-
-        const rawMsg = unwrapMessage(msg.message);
-        if (!rawMsg) return;
-
-        // Cache for Anti-delete
-        if (msg.key?.id) {
-            if (messageStore.size >= MAX_MSG_STORE) messageStore.delete(messageStore.keys().next().value);
-            messageStore.set(msg.key.id, { key: msg.key, message: rawMsg, pushName: msg.pushName });
-        }
-
-        const isMe = Boolean(msg.key.fromMe);
-        const botUserNumber = sock.user?.id ? sock.user.id.split(':')[0].split('@')[0].replace(/[^0-9]/g, '') : '';
-        const rawSender = isMe 
-            ? (sock.user?.id || sock.user?.lid || remoteJid) 
-            : (msg.key.participant || msg.participant || remoteJid);
-        const cleanSender = rawSender ? rawSender.split(':')[0].split('@')[0].replace(/[^0-9]/g, '') : '';
-        const cleanJid = cleanSender ? `${cleanSender}@s.whatsapp.net` : '';
-
-        // Developer / Owner Verification
-        const isDev = isMe || 
-                      devNumbers.includes(cleanSender) || 
-                      devs.includes(cleanJid) ||
-                      devs.includes(rawSender) ||
-                      (cleanSender && cleanSender === botUserNumber);
-
-        // View-Once Auto Forward
-        const viewOnce = msg.message.viewOnceMessage?.message || 
-                         msg.message.viewOnceMessageV2?.message || 
-                         msg.message.viewOnceMessageV2Extension?.message;
-
-        if (viewOnce) {
-            if (msg.key?.id) {
-                if (viewOnceStore.size >= 30) viewOnceStore.delete(viewOnceStore.keys().next().value);
-                viewOnceStore.set(msg.key.id, { message: viewOnce, msg });
+                if (messageStore.size >= MAX_MSG_STORE) messageStore.delete(messageStore.keys().next().value);
+                messageStore.set(msg.key.id, { key: msg.key, message: rawMsg, pushName: msg.pushName });
             }
 
-            if (global.botSettings?.antiViewOnce && !isMe) {
-                setImmediate(async () => {
-                    const targetKey = Object.keys(viewOnce)[0];
-                    const mediaType = targetKey.replace('Message', '');
-                    const buffer = await downloadMedia(viewOnce[targetKey], mediaType);
-                    if (buffer) {
-                        const destMode = global.botSettings?.antiSendDest || 'me';
-                        const sendTarget = (destMode === 'from') ? remoteJid : devs[0];
+            const isMe = Boolean(msg.key.fromMe);
+            const botUserNumber = sock.user?.id ? sock.user.id.split(':')[0].split('@')[0].replace(/[^0-9]/g, '') : '';
+            const rawSender = isMe 
+                ? (sock.user?.id || sock.user?.lid || remoteJid) 
+                : (msg.key.participant || msg.participant || remoteJid);
+            const cleanSender = rawSender ? rawSender.split(':')[0].split('@')[0].replace(/[^0-9]/g, '') : '';
+            const cleanJid = cleanSender ? `${cleanSender}@s.whatsapp.net` : '';
 
-                        const infoHeader = `👁️‍🗨️ *Anti View-Once Captured!*\n\n👤 *From:* ${msg.pushName || cleanSender} (+${cleanSender})\n📝 *Caption:* ${viewOnce[targetKey]?.caption || 'None'}`;
-                        if (mediaType === 'image') sock.sendMessage(sendTarget, { image: buffer, caption: infoHeader }).catch(() => {});
-                        else if (mediaType === 'video') sock.sendMessage(sendTarget, { video: buffer, caption: infoHeader }).catch(() => {});
-                        else if (mediaType === 'audio') {
-                            sock.sendMessage(sendTarget, { text: infoHeader }).catch(() => {});
-                            sock.sendMessage(sendTarget, { audio: buffer, mimetype: 'audio/mp4', ptt: true }).catch(() => {});
+            const isDev = isMe || 
+                          devNumbers.includes(cleanSender) || 
+                          devs.includes(cleanJid) ||
+                          devs.includes(rawSender) ||
+                          (cleanSender && cleanSender === botUserNumber);
+
+            // View-Once Auto Forward
+            const viewOnce = msg.message.viewOnceMessage?.message || 
+                             msg.message.viewOnceMessageV2?.message || 
+                             msg.message.viewOnceMessageV2Extension?.message;
+
+            if (viewOnce) {
+                if (msg.key?.id) {
+                    if (viewOnceStore.size >= 30) viewOnceStore.delete(viewOnceStore.keys().next().value);
+                    viewOnceStore.set(msg.key.id, { message: viewOnce, msg });
+                }
+
+                if (global.botSettings?.antiViewOnce && !isMe) {
+                    setImmediate(async () => {
+                        const targetKey = Object.keys(viewOnce)[0];
+                        const mediaType = targetKey.replace('Message', '');
+                        const buffer = await downloadMedia(viewOnce[targetKey], mediaType);
+                        if (buffer) {
+                            const destMode = global.botSettings?.antiSendDest || 'me';
+                            const sendTarget = (destMode === 'from') ? remoteJid : devs[0];
+
+                            const infoHeader = `👁️‍🗨️ *Anti View-Once Captured!*\n\n👤 *From:* ${msg.pushName || cleanSender} (+${cleanSender})\n📝 *Caption:* ${viewOnce[targetKey]?.caption || 'None'}`;
+                            if (mediaType === 'image') sock.sendMessage(sendTarget, { image: buffer, caption: infoHeader }).catch(() => {});
+                            else if (mediaType === 'video') sock.sendMessage(sendTarget, { video: buffer, caption: infoHeader }).catch(() => {});
+                            else if (mediaType === 'audio') {
+                                sock.sendMessage(sendTarget, { text: infoHeader }).catch(() => {});
+                                sock.sendMessage(sendTarget, { audio: buffer, mimetype: 'audio/mp4', ptt: true }).catch(() => {});
+                            }
                         }
-                    }
-                });
+                    });
+                }
             }
-        }
 
-        // Mode Filters
-        if (global.botSettings?.mode === 'private' && !isDev) return;
-        if (global.botSettings?.mode === 'group' && !remoteJid.endsWith('@g.us') && !isDev) return;
+            // Mode Filters
+            if (global.botSettings?.mode === 'private' && !isDev) continue;
+            if (global.botSettings?.mode === 'group' && !remoteJid.endsWith('@g.us') && !isDev) continue;
 
-        let text = extractMessageText(rawMsg).trim();
+            let text = extractMessageText(rawMsg).trim();
+            if (!text) continue;
 
-        const contextInfo = rawMsg.extendedTextMessage?.contextInfo || 
-                            rawMsg[Object.keys(rawMsg)[0]]?.contextInfo;
-        const quotedMsg = contextInfo?.quotedMessage ? unwrapMessage(contextInfo.quotedMessage) : null;
-        const stanzaId = contextInfo?.stanzaId;
-        const isStatusReply = contextInfo?.remoteJid === 'status@broadcast';
+            const contextInfo = rawMsg.extendedTextMessage?.contextInfo || 
+                                rawMsg[Object.keys(rawMsg)[0]]?.contextInfo;
+            const quotedMsg = contextInfo?.quotedMessage ? unwrapMessage(contextInfo.quotedMessage) : null;
+            const stanzaId = contextInfo?.stanzaId;
+            const isStatusReply = contextInfo?.remoteJid === 'status@broadcast';
 
-        // Emoji Unlock for View-Once
-        if (viewOnceEmojis.includes(text) && quotedMsg) {
-            let targetVO = quotedMsg;
-            if (stanzaId && viewOnceStore.has(stanzaId)) {
-                targetVO = viewOnceStore.get(stanzaId).message;
+            // Emoji Unlock for View-Once
+            if (viewOnceEmojis.includes(text) && quotedMsg) {
+                let targetVO = quotedMsg;
+                if (stanzaId && viewOnceStore.has(stanzaId)) {
+                    targetVO = viewOnceStore.get(stanzaId).message;
+                }
+                const unlocked = await sendUnlockedViewOnce(targetVO, remoteJid, msg);
+                if (unlocked) {
+                    await sock.sendMessage(remoteJid, { react: { text: '🔓', key: msg.key } }).catch(() => {});
+                    continue;
+                }
             }
-            const unlocked = await sendUnlockedViewOnce(targetVO, remoteJid, msg);
-            if (unlocked) {
-                await sock.sendMessage(remoteJid, { react: { text: '🔓', key: msg.key } }).catch(() => {});
-                return;
-            }
-        }
 
-        // Status Saver
-        if (statusKeywords.includes(text.toLowerCase()) && (quotedMsg || isStatusReply)) {
-            let target = (statusStore && stanzaId ? unwrapMessage(statusStore.get(stanzaId)?.message) : null) || quotedMsg;
+            // Status Saver
+            if (statusKeywords.includes(text.toLowerCase()) && (quotedMsg || isStatusReply)) {
+                let target = (statusStore && stanzaId ? unwrapMessage(statusStore.get(stanzaId)?.message) : null) || quotedMsg;
 
-            if (target) {
-                if (target.videoMessage) {
-                    sock.sendMessage(remoteJid, { react: { text: '😼', key: msg.key } }).catch(() => {});
-                    const buffer = await downloadMedia(target.videoMessage, 'video');
-                    if (buffer) {
-                        await sock.sendMessage(remoteJid, { video: buffer, caption: target.videoMessage.caption || `📥 *Status Saved by ${BOT_NAME}*` }, { quoted: msg });
-                        await sock.sendMessage(remoteJid, { react: { text: '😹', key: msg.key } });
-                        return;
-                    }
-                } else if (target.imageMessage) {
-                    sock.sendMessage(remoteJid, { react: { text: '😼', key: msg.key } }).catch(() => {});
-                    const buffer = await downloadMedia(target.imageMessage, 'image');
-                    if (buffer) {
-                        await sock.sendMessage(remoteJid, { image: buffer, caption: target.imageMessage.caption || `📥 *Status Saved by ${BOT_NAME}*` }, { quoted: msg });
-                        await sock.sendMessage(remoteJid, { react: { text: '😹', key: msg.key } });
-                        return;
-                    }
-                } else if (target.conversation || target.extendedTextMessage) {
-                    const statusText = (target.conversation || target.extendedTextMessage?.text || '').trim();
-                    if (statusText) {
-                        await sock.sendMessage(remoteJid, { text: `📝 *Status Text:*\n\n${statusText}` }, { quoted: msg });
-                        await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
-                        return;
+                if (target) {
+                    if (target.videoMessage) {
+                        sock.sendMessage(remoteJid, { react: { text: '😼', key: msg.key } }).catch(() => {});
+                        const buffer = await downloadMedia(target.videoMessage, 'video');
+                        if (buffer) {
+                            await sock.sendMessage(remoteJid, { video: buffer, caption: target.videoMessage.caption || `📥 *Status Saved by ${BOT_NAME}*` }, { quoted: msg });
+                            await sock.sendMessage(remoteJid, { react: { text: '😹', key: msg.key } });
+                            continue;
+                        }
+                    } else if (target.imageMessage) {
+                        sock.sendMessage(remoteJid, { react: { text: '😼', key: msg.key } }).catch(() => {});
+                        const buffer = await downloadMedia(target.imageMessage, 'image');
+                        if (buffer) {
+                            await sock.sendMessage(remoteJid, { image: buffer, caption: target.imageMessage.caption || `📥 *Status Saved by ${BOT_NAME}*` }, { quoted: msg });
+                            await sock.sendMessage(remoteJid, { react: { text: '😹', key: msg.key } });
+                            continue;
+                        }
+                    } else if (target.conversation || target.extendedTextMessage) {
+                        const statusText = (target.conversation || target.extendedTextMessage?.text || '').trim();
+                        if (statusText) {
+                            await sock.sendMessage(remoteJid, { text: `📝 *Status Text:*\n\n${statusText}` }, { quoted: msg });
+                            await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
+                            continue;
+                        }
                     }
                 }
             }
-        }
 
-        // Song Reply Selector
-        if (['1', '2', '3', '1️⃣', '2️⃣', '3️⃣'].includes(text) && quotedMsg) {
-            const songCmd = commands.get('song');
-            if (songCmd && typeof songCmd.handleReply === 'function') {
-                const isHandled = await songCmd.handleReply(sock, msg, text, BOT_NAME);
-                if (isHandled) return;
+            // Song Reply Selector
+            if (['1', '2', '3', '1️⃣', '2️⃣', '3️⃣'].includes(text) && quotedMsg) {
+                const songCmd = commands.get('song');
+                if (songCmd && typeof songCmd.handleReply === 'function') {
+                    const isHandled = await songCmd.handleReply(sock, msg, text, BOT_NAME);
+                    if (isHandled) continue;
+                }
             }
-        }
 
-        // Setting Shortcuts (1.1, 10.1 etc.)
-        if (isDev && validSettingNumbers.includes(text.toLowerCase())) {
-            const settingCmd = commands.get('setting');
-            if (settingCmd) {
-                settingCmd.execute(sock, msg, [text], isDev, BOT_NAME, cleanSender || botUserNumber).catch(() => {});
-                return;
+            // Setting Shortcuts (1.1, 10.1 ආදී)
+            if (isDev && validSettingNumbers.includes(text.toLowerCase())) {
+                const settingCmd = commands.get('setting');
+                if (settingCmd) {
+                    settingCmd.execute(sock, msg, [text], isDev, BOT_NAME, cleanSender || botUserNumber).catch(() => {});
+                    continue;
+                }
             }
-        }
 
-        // ⚡ Fast Command Execution (Prefix . සහ . නැතිව දෙකෙන්ම)
-        const hasPrefix = text.startsWith('.');
-        const cleanText = hasPrefix ? text.slice(1).trim() : text.trim();
-        const args = cleanText.split(/ +/);
-        const commandName = args.shift().toLowerCase();
+            // ⚡ Fast Command Router (Prefix . ඇතිව එන විධාන)
+            if (!text.startsWith('.')) continue;
+            const args = text.slice(1).trim().split(/ +/);
+            const commandName = args.shift().toLowerCase();
 
-        // Dot prefix එකෙන් එන commands හෝ direct matching commands
-        if (hasPrefix && commands.has(commandName)) {
             const cmd = commands.get(commandName);
-            try {
-                console.log(`⚡ [EXEC] Command: .${commandName} from ${cleanSender || 'Owner'}`);
-                await cmd.execute(sock, msg, args, isDev, BOT_NAME, cleanSender || botUserNumber, commandName);
-            } catch (err) {
-                console.error(`Command [${commandName}] failed:`, err.message);
+            if (cmd) {
+                try {
+                    await cmd.execute(sock, msg, args, isDev, BOT_NAME, cleanSender || botUserNumber, commandName);
+                } catch (err) {
+                    console.error(`Command [${commandName}] failed:`, err.message);
+                }
             }
         }
     });
 
-    // Messages Update
+    // Messages Update (Revoke / Anti-Delete)
     sock.ev.on('messages.update', async (updates) => {
         for (const update of updates) {
             const protocolMsg = update.update?.message?.protocolMessage;
