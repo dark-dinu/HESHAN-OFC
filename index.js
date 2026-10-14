@@ -150,7 +150,7 @@ async function startBot() {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
 
                 if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-                    console.log('🔴 [AUTH] Logged out. Factory Resetting...');
+                    console.log('🔴 [AUTH] Session logged out. Performing Factory Reset...');
                     if (fs.existsSync(SESSION_DIR)) fs.rmSync(SESSION_DIR, { recursive: true, force: true });
                     await purgeAllUserData();
                     scheduleReconnect(3000);
@@ -285,41 +285,41 @@ app.get('/pair', (req, res) => {
     `);
 });
 
-// ⚡ Ultra-Stable Pairing API (Auto Cleans Broken Unlinked Sessions)
+// ⚡ 100% Null-Safe Pairing API (Never crashes if socket is initializing)
 app.get('/api/pair', async (req, res) => {
     let phone = req.query.phone;
     if (!phone) return res.json({ status: false, message: 'Phone number is required' });
     phone = phone.replace(/[^0-9]/g, '');
 
     try {
+        // Socket එක null නම් start කර එය ready වන තෙක් රැඳී සිටී
         if (!sock) {
+            isStarting = false;
             startBot();
-            await delay(2000);
         }
 
-        if (sock?.authState?.creds?.registered) {
+        let retries = 0;
+        while ((!sock || !sock.requestPairingCode) && retries < 15) {
+            await delay(500);
+            retries++;
+        }
+
+        if (!sock || !sock.requestPairingCode) {
+            return res.json({ status: false, message: 'Bot engine is initializing. Please tap Try Again in 3 seconds.' });
+        }
+
+        if (sock.authState?.creds?.registered) {
             return res.json({ status: false, message: 'Bot is already linked to WhatsApp!' });
         }
 
-        // Socket එක disconnected හෝ closed නම් re-init කිරීම
-        if (!sock?.ws || sock.ws.readyState !== 1) {
-            if (fs.existsSync(SESSION_DIR)) fs.rmSync(SESSION_DIR, { recursive: true, force: true });
-            cleanupSocket();
-            await startBot();
-            await delay(2500);
-        }
-
-        await delay(1000);
+        await delay(1500);
         let code = await sock.requestPairingCode(phone);
         code = code?.match(/.{1,4}/g)?.join('-') || code;
         return res.json({ status: true, code });
+
     } catch (err) {
-        console.error('[PAIR CODE ERROR]:', err.message);
-        // Socket එක stale වී ඇත්නම් clean restart එකක් ලබා දීම
-        cleanupSocket();
-        if (fs.existsSync(SESSION_DIR)) fs.rmSync(SESSION_DIR, { recursive: true, force: true });
-        scheduleReconnect(1000);
-        return res.json({ status: false, message: err.message || 'Error generating code. Please click Try Again in 5 seconds.' });
+        console.error('[PAIR API ERROR]:', err.message);
+        return res.json({ status: false, message: err.message || 'Error generating pairing code.' });
     }
 });
 
@@ -332,19 +332,26 @@ setInterval(() => {
     }
 }, 1000 * 60 * 3);
 
+// Periodic Key Sync
+setInterval(() => {
+    if (sock?.authState?.creds?.registered) {
+        backupFullSession();
+    }
+}, 1000 * 60 * 10);
+
 // Crash Guards
 process.on('uncaughtException', (err) => console.error('🛡️ [CRASH GUARD]:', err.message));
 process.on('unhandledRejection', (reason) => console.error('🛡️ [REJECTION GUARD]:', reason?.message || reason));
 
-// ⚡ Immediate Port Binding (Render Timeout වීම 100% වළක්වයි)
+// Server Boot
 app.listen(PORT, async () => {
-    console.log(`🌐 Web Server running on port ${PORT}`);
+    console.log(`🌐 Server running on port ${PORT}`);
     try {
         await mongoose.connect(MONGO_URI);
         console.log('✅ Connected to Database Engine!');
         await loadSettings();
     } catch (err) {
-        console.error('❌ DB Error:', err.message);
+        console.error('❌ Connection Error:', err.message);
     }
     startBot();
 });
