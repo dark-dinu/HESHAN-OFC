@@ -7,7 +7,9 @@ function parseTime(str) {
     if (!match) return null;
     let h = match[1].padStart(2, '0');
     let m = match[2];
-    if (parseInt(h, 10) > 23 || parseInt(m, 10) > 59) return null;
+    const hNum = parseInt(h, 10);
+    const mNum = parseInt(m, 10);
+    if (hNum > 23 || mNum > 59) return null;
     return `${h}:${m}`;
 }
 
@@ -15,7 +17,8 @@ module.exports = {
     name: 'time',
     aliases: ['schedule', 'timer', 'settime'],
     execute: async (sock, msg, args, isDev, BOT_NAME) => {
-        const chatJid = msg.key.remoteJid;
+        const chatJid = msg.key?.remoteJid;
+        if (!chatJid) return;
 
         if (!isDev) {
             return sock.sendMessage(chatJid, { text: '❌ Only Bot Owner/Developer can schedule messages!' }, { quoted: msg });
@@ -31,7 +34,7 @@ module.exports = {
                     return sock.sendMessage(chatJid, { text: '📭 No active Chat schedules found.' }, { quoted: msg });
                 }
 
-                let text = `⏰ *SCHEDULED CHAT MESSAGES*\n🕒 *Current SL Time:* ${getSLTime()}\n\n`;
+                let text = `⏰ *SCHEDULED CHAT MESSAGES*\n🕒 *Current Time:* ${getSLTime()}\n\n`;
                 list.forEach((item, i) => {
                     text += `*${i + 1}.* 🎯 *Target:* \`${item.target}\`\n`;
                     text += `   🕒 *Time:* \`${item.time}\` (24h)\n`;
@@ -48,7 +51,7 @@ module.exports = {
                     return sock.sendMessage(chatJid, { text: '📭 No active Channel schedules found.' }, { quoted: msg });
                 }
 
-                let text = `📢 *SCHEDULED CHANNEL MESSAGES*\n🕒 *Current SL Time:* ${getSLTime()}\n\n`;
+                let text = `📢 *SCHEDULED CHANNEL MESSAGES*\n🕒 *Current Time:* ${getSLTime()}\n\n`;
                 list.forEach((item, i) => {
                     text += `*${i + 1}.* 🔗 *Channel:* \`${item.target}\`\n`;
                     text += `   🕒 *Time:* \`${item.time}\` (24h)\n`;
@@ -94,16 +97,16 @@ module.exports = {
                 sock.sendMessage(chatJid, { react: { text: '⏰', key: msg.key } }).catch(() => {});
 
                 return sock.sendMessage(chatJid, { 
-                    text: `✅ *Channel Schedule Added!*\n\n📢 *Target:* \`${target}\`\n🕒 *Time:* \`${time}\` (SL Time)\n💬 *Message:* ${message}` 
+                    text: `✅ *Channel Schedule Added!*\n\n📢 *Target:* \`${target}\`\n🕒 *Time:* \`${time}\`\n💬 *Message:* ${message}` 
                 }, { quoted: msg });
             }
 
-            // 💬 4. Chat Schedule (.time 94705836838,මොකද කරන්නෙ..🤭,15:20)
+            // 💬 4. Chat Schedule (.time 94705836838,message,15:20)
             const parts = input.split(',');
             if (parts.length < 3) {
                 return sock.sendMessage(chatJid, { 
                     text: `⚙️ *SCHEDULE USAGE GUIDE*\n\n` +
-                          `1️⃣ *Chat Schedule:*\n.time 94705836838,මොකද කරන්නෙ..🤭,15:20\n\n` +
+                          `1️⃣ *Chat Schedule:*\n.time 94705836838,Good Morning!,15:20\n\n` +
                           `2️⃣ *View Chat List:*\n.time list\n\n` +
                           `3️⃣ *Channel Schedule:*\n.time channel,<link/jid>,15:20,Hello guys!\n\n` +
                           `4️⃣ *View Channel List:*\n.time channel list\n\n` +
@@ -111,7 +114,6 @@ module.exports = {
                 }, { quoted: msg });
             }
 
-            // Clean & normalize Target (Group ID හෝ Phone number)
             let rawTarget = parts[0].trim();
             let target = rawTarget;
             if (!rawTarget.includes('@g.us')) {
@@ -135,7 +137,7 @@ module.exports = {
 
             if (!time || !message) {
                 return sock.sendMessage(chatJid, { 
-                    text: `⚠️ *Invalid Time!* Time format must be 24-hour HH:mm (e.g. 15:20 or 09:30).` 
+                    text: `⚠️ *Invalid Format!* Time format must be 24-hour HH:mm (e.g. 15:20 or 09:30).` 
                 }, { quoted: msg });
             }
 
@@ -149,12 +151,12 @@ module.exports = {
             sock.sendMessage(chatJid, { react: { text: '⏰', key: msg.key } }).catch(() => {});
 
             return sock.sendMessage(chatJid, { 
-                text: `✅ *Chat Schedule Added Successfully!*\n\n🎯 *Target:* \`${target}\`\n🕒 *Time:* \`${time}\` (SL Time)\n💬 *Message:* ${message}` 
+                text: `✅ *Chat Schedule Added Successfully!*\n\n🎯 *Target:* \`${target}\`\n🕒 *Time:* \`${time}\`\n💬 *Message:* ${message}` 
             }, { quoted: msg });
 
         } catch (err) {
-            console.error('[TIME CMD ERROR]:', err);
-            return sock.sendMessage(chatJid, { text: `❌ Database Error: ${err.message}` }, { quoted: msg });
+            console.error('[TIME CMD ERROR]:', err.message);
+            return sock.sendMessage(chatJid, { text: '❌ Failed to process schedule request. Please try again.' }, { quoted: msg });
         }
     }
 };
