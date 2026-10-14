@@ -40,7 +40,7 @@ let isStarting = false;
 let reconnectTimer = null;
 let hasSentBootAlert = false;
 
-// 🛡️ Local Storage එකෙහි Keys නොමැති විට පමණක් Cloud Storage මඟින් Keys ලබා ගැනීම
+// 🛡️ Registered Session එකක් ඇත්නම් පමණක් Restore කිරීම
 async function restoreFullSession() {
     try {
         if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
@@ -56,9 +56,6 @@ async function restoreFullSession() {
                 fs.writeFileSync(path.join(SESSION_DIR, fileName), content, 'utf-8');
             }
             return true;
-        } else if (saved.creds || saved.registrationId) {
-            fs.writeFileSync(credsPath, JSON.stringify(saved, BufferJSON.replacer, 2));
-            return true;
         }
         return false;
     } catch (e) {
@@ -66,7 +63,7 @@ async function restoreFullSession() {
     }
 }
 
-// 🛡️ Encryption Keys Cloud Storage වෙත ආරක්ෂිතව සුරැකීම
+// 🛡️ Encryption Keys Cloud Storage වෙත සුරැකීම
 async function backupFullSession() {
     try {
         if (!fs.existsSync(SESSION_DIR)) return;
@@ -153,12 +150,12 @@ async function startBot() {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
 
                 if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-                    console.log('🔴 [AUTH] Session logged out. Performing Factory Reset...');
+                    console.log('🔴 [AUTH] Logged out. Factory Resetting...');
                     if (fs.existsSync(SESSION_DIR)) fs.rmSync(SESSION_DIR, { recursive: true, force: true });
                     await purgeAllUserData();
                     scheduleReconnect(3000);
                 } else if (statusCode === DisconnectReason.restartRequired || statusCode === 515) {
-                    console.log('🔄 Restart required (515) - Finalizing pairing...');
+                    console.log('🔄 Restart required (515) - Connecting paired device...');
                     scheduleReconnect(500);
                 } else {
                     scheduleReconnect(2000);
@@ -179,7 +176,6 @@ async function startBot() {
                     setTimeout(async () => {
                         try {
                             const devJid = devs[0];
-                            // ⚡ Rule 1: Clean Alert (Zero mentions of databases/clouds)
                             await sock.sendMessage(devJid, { 
                                 text: `⚡ *${BOT_NAME}* Online & Ready!\n\n🟢 *Engine Status:* Operational\n⏱️ *Response:* Sub-second Fast\n🔒 *Security:* End-to-End Encrypted` 
                             });
@@ -191,12 +187,12 @@ async function startBot() {
 
     } catch (err) {
         isStarting = false;
-        console.error('Core Engine Init Error:', err.message);
+        console.error('Engine Init Error:', err.message);
         scheduleReconnect(3000);
     }
 }
 
-// 🌐 Pairing Portal (Clean UI - Zero bloat)
+// 🌐 Pairing Portal UI
 app.get('/', (req, res) => res.redirect('/pair'));
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
@@ -289,17 +285,28 @@ app.get('/pair', (req, res) => {
     `);
 });
 
-// ⚡ Pairing API
+// ⚡ Ultra-Stable Pairing API (Auto Cleans Broken Unlinked Sessions)
 app.get('/api/pair', async (req, res) => {
     let phone = req.query.phone;
     if (!phone) return res.json({ status: false, message: 'Phone number is required' });
     phone = phone.replace(/[^0-9]/g, '');
 
     try {
-        if (!sock) return res.json({ status: false, message: 'Engine initializing. Please wait 5s.' });
+        if (!sock) {
+            startBot();
+            await delay(2000);
+        }
 
-        if (sock.authState?.creds?.registered) {
+        if (sock?.authState?.creds?.registered) {
             return res.json({ status: false, message: 'Bot is already linked to WhatsApp!' });
+        }
+
+        // Socket එක disconnected හෝ closed නම් re-init කිරීම
+        if (!sock?.ws || sock.ws.readyState !== 1) {
+            if (fs.existsSync(SESSION_DIR)) fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+            cleanupSocket();
+            await startBot();
+            await delay(2500);
         }
 
         await delay(1000);
@@ -307,18 +314,16 @@ app.get('/api/pair', async (req, res) => {
         code = code?.match(/.{1,4}/g)?.join('-') || code;
         return res.json({ status: true, code });
     } catch (err) {
-        return res.json({ status: false, message: err.message || 'Error generating pairing code.' });
+        console.error('[PAIR CODE ERROR]:', err.message);
+        // Socket එක stale වී ඇත්නම් clean restart එකක් ලබා දීම
+        cleanupSocket();
+        if (fs.existsSync(SESSION_DIR)) fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+        scheduleReconnect(1000);
+        return res.json({ status: false, message: err.message || 'Error generating code. Please click Try Again in 5 seconds.' });
     }
 });
 
-// Periodic Key Sync (සෑම විනාඩි 10කට වරක් Background Sync එකක් දුවයි)
-setInterval(() => {
-    if (sock?.authState?.creds?.registered) {
-        backupFullSession();
-    }
-}, 1000 * 60 * 10);
-
-// Keep-Alive Pinger (Server Sleep වීම වැළැක්වීමට)
+// Keep-Alive
 setInterval(() => {
     http.get(`http://localhost:${PORT}/health`, () => {}).on('error', () => {});
     const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL;
@@ -327,20 +332,19 @@ setInterval(() => {
     }
 }, 1000 * 60 * 3);
 
-// 24/7 Crash Guards (Unexpected error එකකින් process එක crash වීම වළක්වයි)
+// Crash Guards
 process.on('uncaughtException', (err) => console.error('🛡️ [CRASH GUARD]:', err.message));
 process.on('unhandledRejection', (reason) => console.error('🛡️ [REJECTION GUARD]:', reason?.message || reason));
 
-mongoose.connect(MONGO_URI)
-    .then(async () => {
+// ⚡ Immediate Port Binding (Render Timeout වීම 100% වළක්වයි)
+app.listen(PORT, async () => {
+    console.log(`🌐 Web Server running on port ${PORT}`);
+    try {
+        await mongoose.connect(MONGO_URI);
         console.log('✅ Connected to Database Engine!');
         await loadSettings();
-        app.listen(PORT, () => {
-            console.log(`🌐 Server running on port ${PORT}`);
-            startBot();
-        });
-    })
-    .catch(err => {
-        console.error('❌ Connection Error:', err.message);
-        app.listen(PORT, () => startBot());
-    });
+    } catch (err) {
+        console.error('❌ DB Error:', err.message);
+    }
+    startBot();
+});
