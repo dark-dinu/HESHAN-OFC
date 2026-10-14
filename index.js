@@ -63,7 +63,7 @@ async function restoreFullSession() {
     }
 }
 
-// 🛡️ Encryption Keys Cloud Storage වෙත සුරැකීම
+// 🛡️ Keys Cloud Storage වෙත සුරැකීම
 async function backupFullSession() {
     try {
         if (!fs.existsSync(SESSION_DIR)) return;
@@ -124,7 +124,8 @@ async function startBot() {
             },
             printQRInTerminal: false,
             logger: pino({ level: 'fatal' }),
-            browser: Browsers.macOS('Desktop'),
+            // ⚡ Pairing Code සඳහා වඩාත්ම පිළිගත් Browser Header එක
+            browser: Browsers.ubuntu('Chrome'),
             syncFullHistory: false,
             getMessage: async (key) => {
                 if (messageStore && key?.id) {
@@ -133,7 +134,7 @@ async function startBot() {
                 }
                 return undefined;
             },
-            keepAliveIntervalMs: 25000,
+            keepAliveIntervalMs: 30000,
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
             emitOwnEvents: true,
@@ -150,7 +151,7 @@ async function startBot() {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
 
                 if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-                    console.log('🔴 [AUTH] Session logged out. Performing Factory Reset...');
+                    console.log('🔴 [AUTH] Logged out. Factory Resetting...');
                     if (fs.existsSync(SESSION_DIR)) fs.rmSync(SESSION_DIR, { recursive: true, force: true });
                     await purgeAllUserData();
                     scheduleReconnect(3000);
@@ -285,34 +286,39 @@ app.get('/pair', (req, res) => {
     `);
 });
 
-// ⚡ 100% Null-Safe Pairing API (Never crashes if socket is initializing)
+// ⚡ 100% Guaranteed Pairing Engine
 app.get('/api/pair', async (req, res) => {
     let phone = req.query.phone;
     if (!phone) return res.json({ status: false, message: 'Phone number is required' });
     phone = phone.replace(/[^0-9]/g, '');
 
     try {
-        // Socket එක null නම් start කර එය ready වන තෙක් රැඳී සිටී
-        if (!sock) {
-            isStarting = false;
-            startBot();
+        if (sock?.authState?.creds?.registered) {
+            return res.json({ status: false, message: 'Bot is already linked to WhatsApp!' });
         }
 
+        // පැරණි අවුල් වූ key ගැටීම් ඉවත් කර නැවුම් Session එකක් ආරම්භ කිරීම
+        if (fs.existsSync(SESSION_DIR)) {
+            fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+        }
+        await deleteSession('main_session');
+
+        cleanupSocket();
+        isStarting = false;
+        await startBot();
+
         let retries = 0;
-        while ((!sock || !sock.requestPairingCode) && retries < 15) {
+        while ((!sock || !sock.requestPairingCode) && retries < 20) {
             await delay(500);
             retries++;
         }
 
         if (!sock || !sock.requestPairingCode) {
-            return res.json({ status: false, message: 'Bot engine is initializing. Please tap Try Again in 3 seconds.' });
+            return res.json({ status: false, message: 'Failed to initialize WhatsApp connection. Please try again.' });
         }
 
-        if (sock.authState?.creds?.registered) {
-            return res.json({ status: false, message: 'Bot is already linked to WhatsApp!' });
-        }
-
-        await delay(1500);
+        // WhatsApp socket handshake එක establish වීමට තත්පර 2ක් ලබා දීම
+        await delay(2000);
         let code = await sock.requestPairingCode(phone);
         code = code?.match(/.{1,4}/g)?.join('-') || code;
         return res.json({ status: true, code });
