@@ -139,13 +139,13 @@ async function startBotInstance(botNum) {
                 }
                 return undefined;
             },
-            keepAliveIntervalMs: 25000,
+            keepAliveIntervalMs: 10000,
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
+            retryRequestDelayMs: 2000,
             emitOwnEvents: true
         });
 
-        // Event Handlers සෘජුව Bind කිරීම
         registerAllHandlers(bot.sock, devs, devNumbers, BOT_NAME);
 
         bot.sock.ev.on('creds.update', async () => {
@@ -160,7 +160,7 @@ async function startBotInstance(botNum) {
                 console.log(`⚠️ [BOT #${botNum}] Offline! StatusCode: ${statusCode}`);
 
                 if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-                    console.log(`🔴 [BOT #${botNum}] Logged out. Clearing session files...`);
+                    console.log(`🔴 [BOT #${botNum}] Logged out. Resetting session...`);
                     if (fs.existsSync(bot.sessionDir)) fs.rmSync(bot.sessionDir, { recursive: true, force: true });
                     await deleteSession(bot.id);
                 } else {
@@ -171,8 +171,6 @@ async function startBotInstance(botNum) {
                 console.log(`✅ [BOT #${botNum}] Connected & Live!`);
 
                 const botJid = bot.sock.user?.id ? bot.sock.user.id.split(':')[0] + '@s.whatsapp.net' : devs[0];
-                
-                // 🚀 WhatsApp එකට Connecting Alert එක යැවීම
                 try {
                     await bot.sock.sendMessage(botJid, {
                         text: `*⚡ ${BOT_NAME} BOT #${botNum} CONNECTED! ⚡*\n\n> 🟢 Status: *ONLINE*\n> 🛡️ Mode: *ACTIVE*\n> ⏰ Time: *${new Date().toLocaleTimeString()}*`
@@ -195,6 +193,7 @@ async function startBotInstance(botNum) {
     }
 }
 
+// Web Controller UI
 app.get('/', (req, res) => res.redirect('/pair'));
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
@@ -259,12 +258,13 @@ app.get('/api/reset', async (req, res) => {
     }
 });
 
+// Self-ping to prevent Sleep
 setInterval(() => {
     http.get(`http://localhost:${PORT}/health`, () => {}).on('error', () => {});
     if (process.env.RENDER_EXTERNAL_URL) {
         https.get(`${process.env.RENDER_EXTERNAL_URL}/health`, () => {}).on('error', () => {});
     }
-}, 180000);
+}, 120000);
 
 process.on('uncaughtException', (err) => console.error('🛡️ [CRASH]:', err.message));
 process.on('unhandledRejection', (reason) => console.error('🛡️ [REJECT]:', reason?.message || reason));
@@ -275,7 +275,7 @@ app.listen(PORT, async () => {
         await mongoose.connect(MONGO_URI);
         await loadSettings();
     } catch (err) {
-        console.error('❌ Database Connection Error:', err.message);
+        console.error('❌ DB Error:', err.message);
     }
     startBotInstance(1);
 });
