@@ -33,7 +33,6 @@ const devs = [
     '15947733680169@lid'
 ];
 
-// 🤖 1 සිට 10 දක්වා Dynamic Bots Engine
 const TOTAL_BOTS = 10;
 const BOTS = {};
 
@@ -47,7 +46,6 @@ for (let i = 1; i <= TOTAL_BOTS; i++) {
     };
 }
 
-// 🛡️ Multi-Session Cloud Sync
 async function restoreSession(botNum) {
     const bot = BOTS[botNum];
     try {
@@ -133,7 +131,7 @@ async function startBotInstance(botNum) {
             logger: pino({ level: 'silent' }),
             browser: Browsers.ubuntu('Chrome'),
             syncFullHistory: false,
-            generateHighQualityLinkPreview: true,
+            generateHighQualityLinkPreview: false,
             getMessage: async (key) => {
                 if (messageStore && key?.id) {
                     const cached = messageStore.get(key.id);
@@ -147,18 +145,19 @@ async function startBotInstance(botNum) {
             emitOwnEvents: true
         });
 
+        // Event Handlers සෘජුව Bind කිරීම
+        registerAllHandlers(bot.sock, devs, devNumbers, BOT_NAME);
+
         bot.sock.ev.on('creds.update', async () => {
             await saveCreds();
             await backupSession(botNum);
         });
 
-        registerAllHandlers(bot.sock, devs, devNumbers, BOT_NAME);
-
         bot.sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
             if (connection === 'close') {
                 bot.isStarting = false;
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
-                console.log(`⚠️ [BOT #${botNum}] Connection closed. Reason code: ${statusCode}`);
+                console.log(`⚠️ [BOT #${botNum}] Offline! StatusCode: ${statusCode}`);
 
                 if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
                     console.log(`🔴 [BOT #${botNum}] Logged out. Clearing session files...`);
@@ -170,6 +169,16 @@ async function startBotInstance(botNum) {
             } else if (connection === 'open') {
                 bot.isStarting = false;
                 console.log(`✅ [BOT #${botNum}] Connected & Live!`);
+
+                const botJid = bot.sock.user?.id ? bot.sock.user.id.split(':')[0] + '@s.whatsapp.net' : devs[0];
+                
+                // 🚀 WhatsApp එකට Connecting Alert එක යැවීම
+                try {
+                    await bot.sock.sendMessage(botJid, {
+                        text: `*⚡ ${BOT_NAME} BOT #${botNum} CONNECTED! ⚡*\n\n> 🟢 Status: *ONLINE*\n> 🛡️ Mode: *ACTIVE*\n> ⏰ Time: *${new Date().toLocaleTimeString()}*`
+                    });
+                } catch (e) {}
+
                 if (botNum === 1) startSchedulerEngine(bot.sock);
                 setTimeout(() => backupSession(botNum), 3000);
 
@@ -186,7 +195,6 @@ async function startBotInstance(botNum) {
     }
 }
 
-// 🌐 10-Bot Pairing Controller Web UI
 app.get('/', (req, res) => res.redirect('/pair'));
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
@@ -197,7 +205,7 @@ app.get('/pair', (req, res) => {
     }
 
     res.send(`
-    <!DOCTYPE html><html><head><title>${BOT_NAME} - 10 Bot Controller</title><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>*{margin:0;padding:0;box-sizing:border-box;font-family:sans-serif;}body{background:#0a0d14;color:#fff;display:flex;justify-content:center;align-items:center;min-height:100vh;padding:20px;}.card{background:#131822;border:1px solid #232b3b;padding:25px 20px;border-radius:20px;text-align:center;max-width:480px;width:100%;}.tabs{display:grid;grid-template-columns:repeat(5, 1fr);gap:6px;margin-bottom:20px;}.tab{padding:8px 4px;border-radius:8px;background:#1c2433;color:#bbb;font-size:12px;font-weight:bold;cursor:pointer;}.tab.active{background:#00e676;color:#000;}input{width:100%;padding:14px;margin-bottom:12px;border-radius:12px;border:1px solid #2e3a4e;background:#0a0d14;color:#fff;text-align:center;font-size:16px;}button{width:100%;padding:14px;border:none;border-radius:12px;font-size:15px;font-weight:bold;cursor:pointer;margin-bottom:10px;}.btn-pair{background:#00e676;color:#000;}.btn-reset{background:rgba(255,68,68,0.15);color:#ff5252;}#codeBox{margin-top:16px;display:none;background:rgba(0,230,118,0.08);border:2px dashed #00e676;border-radius:12px;padding:14px;}#codeText{font-size:26px;font-weight:800;color:#00e676;letter-spacing:4px;cursor:pointer;}</style></head><body><div class="card"><h2 style="color:#00e676;margin-bottom:6px;">${BOT_NAME}</h2><p style="font-size:13px;color:#8899a6;margin-bottom:20px;">10 Instance Bot Controller</p><div class="tabs">${tabsHtml}</div><input type="text" id="phone" placeholder="94719845166"><button class="btn-pair" id="pairBtn" onclick="requestPairCode()">Get Pairing Code</button><button class="btn-reset" onclick="resetSelectedBot()">Unlink & Reset This Bot</button><div id="codeBox"><div style="font-size:12px;color:#aaa;margin-bottom:6px;">Tap Code to Copy:</div><div id="codeText" onclick="navigator.clipboard.writeText(this.innerText);alert('Copied!')"></div></div></div><script>let currentBot=1;function switchBot(n){currentBot=n;for(let i=1;i<=10;i++){document.getElementById('tab'+i).className=i===n?'tab active':'tab';}document.getElementById('codeBox').style.display='none';}async function requestPairCode(){const p=document.getElementById('phone').value.replace(/[^0-9]/g,'');if(!p)return alert('Enter number');const btn=document.getElementById('pairBtn');btn.disabled=true;btn.innerText='Connecting...';try{const res=await fetch('/api/pair?bot='+currentBot+'&phone='+p);const d=await res.json();if(d.status){document.getElementById('codeText').innerText=d.code;document.getElementById('codeBox').style.display='block';}else{alert(d.message);}}catch(e){alert('Error');}finally{btn.disabled=false;btn.innerText='Get Pairing Code';}}async function resetSelectedBot(){if(!confirm('Reset Bot #'+currentBot+'?'))return;const res=await fetch('/api/reset?bot='+currentBot);const d=await res.json();alert(d.message);location.reload();}</script></body></html>
+    <!DOCTYPE html><html><head><title>${BOT_NAME} Controller</title><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>*{margin:0;padding:0;box-sizing:border-box;font-family:sans-serif;}body{background:#0a0d14;color:#fff;display:flex;justify-content:center;align-items:center;min-height:100vh;padding:20px;}.card{background:#131822;border:1px solid #232b3b;padding:25px 20px;border-radius:20px;text-align:center;max-width:480px;width:100%;}.tabs{display:grid;grid-template-columns:repeat(5, 1fr);gap:6px;margin-bottom:20px;}.tab{padding:8px 4px;border-radius:8px;background:#1c2433;color:#bbb;font-size:12px;font-weight:bold;cursor:pointer;}.tab.active{background:#00e676;color:#000;}input{width:100%;padding:14px;margin-bottom:12px;border-radius:12px;border:1px solid #2e3a4e;background:#0a0d14;color:#fff;text-align:center;font-size:16px;}button{width:100%;padding:14px;border:none;border-radius:12px;font-size:15px;font-weight:bold;cursor:pointer;margin-bottom:10px;}.btn-pair{background:#00e676;color:#000;}.btn-reset{background:rgba(255,68,68,0.15);color:#ff5252;}#codeBox{margin-top:16px;display:none;background:rgba(0,230,118,0.08);border:2px dashed #00e676;border-radius:12px;padding:14px;}#codeText{font-size:26px;font-weight:800;color:#00e676;letter-spacing:4px;cursor:pointer;}</style></head><body><div class="card"><h2 style="color:#00e676;margin-bottom:6px;">${BOT_NAME}</h2><p style="font-size:13px;color:#8899a6;margin-bottom:20px;">10 Instance Bot Controller</p><div class="tabs">${tabsHtml}</div><input type="text" id="phone" placeholder="94719845166"><button class="btn-pair" id="pairBtn" onclick="requestPairCode()">Get Pairing Code</button><button class="btn-reset" onclick="resetSelectedBot()">Unlink & Reset This Bot</button><div id="codeBox"><div style="font-size:12px;color:#aaa;margin-bottom:6px;">Tap Code to Copy:</div><div id="codeText" onclick="navigator.clipboard.writeText(this.innerText);alert('Copied!')"></div></div></div><script>let currentBot=1;function switchBot(n){currentBot=n;for(let i=1;i<=10;i++){document.getElementById('tab'+i).className=i===n?'tab active':'tab';}document.getElementById('codeBox').style.display='none';}async function requestPairCode(){const p=document.getElementById('phone').value.replace(/[^0-9]/g,'');if(!p)return alert('Enter number');const btn=document.getElementById('pairBtn');btn.disabled=true;btn.innerText='Connecting...';try{const res=await fetch('/api/pair?bot='+currentBot+'&phone='+p);const d=await res.json();if(d.status){document.getElementById('codeText').innerText=d.code;document.getElementById('codeBox').style.display='block';}else{alert(d.message);}}catch(e){alert('Error');}finally{btn.disabled=false;btn.innerText='Get Pairing Code';}}async function resetSelectedBot(){if(!confirm('Reset Bot #'+currentBot+'?'))return;const res=await fetch('/api/reset?bot='+currentBot);const d=await res.json();alert(d.message);location.reload();}</script></body></html>
     `);
 });
 
@@ -224,7 +232,7 @@ app.get('/api/pair', async (req, res) => {
             retries++;
         }
         if (!bot.sock || !bot.sock.requestPairingCode) {
-            return res.json({ status: false, message: 'Timeout. Please try clicking again.' });
+            return res.json({ status: false, message: 'Timeout. Please click again.' });
         }
 
         await delay(2000);
@@ -269,7 +277,5 @@ app.listen(PORT, async () => {
     } catch (err) {
         console.error('❌ Database Connection Error:', err.message);
     }
-    
-    // Bot 1 start
     startBotInstance(1);
 });
