@@ -22,7 +22,7 @@ if (fs.existsSync(commandsDir)) {
                     cmd.aliases.forEach(alias => commands.set(alias.toLowerCase(), cmd));
                 }
             } catch (e) {
-                console.error(`❌ Failed to preload [${file}]:`, e.message);
+                console.error(`❌ Preload failed [${file}]:`, e.message);
             }
         }
     });
@@ -39,6 +39,7 @@ const statusStore = new Map();
 const processedMessageIds = new Set();
 
 const MAX_MSG_STORE = 300;
+const MAX_MEDIA_STORE = 10;
 
 // ⚡ Low-Memory Buffer Downloader
 async function downloadMedia(content, type) {
@@ -55,26 +56,20 @@ async function downloadMedia(content, type) {
     }
 }
 
-// 🛡️ Universal Message Unwrapper
+// 🛡️ Universal Message Unwrapper (deviceSentMessage ඇතුළු සියලුම Wrappers Unpack කරයි)
 function unwrapMessage(msg) {
+    if (!msg) return null;
     let m = msg;
-    if (!m) return null;
-    while (
-        m.ephemeralMessage?.message ||
-        m.viewOnceMessage?.message ||
-        m.viewOnceMessageV2?.message ||
-        m.viewOnceMessageV2Extension?.message ||
-        m.documentWithCaptionMessage?.message ||
-        m.deviceSentMessage?.message ||
-        m.editedMessage?.message?.protocolMessage?.editedMessage
-    ) {
-        m = m.ephemeralMessage?.message ||
-            m.viewOnceMessage?.message ||
-            m.viewOnceMessageV2?.message ||
-            m.viewOnceMessageV2Extension?.message ||
-            m.documentWithCaptionMessage?.message ||
-            m.deviceSentMessage?.message ||
-            m.editedMessage?.message?.protocolMessage?.editedMessage;
+    for (let i = 0; i < 6; i++) {
+        const next = m.ephemeralMessage?.message ||
+                     m.viewOnceMessage?.message ||
+                     m.viewOnceMessageV2?.message ||
+                     m.viewOnceMessageV2Extension?.message ||
+                     m.documentWithCaptionMessage?.message ||
+                     m.deviceSentMessage?.message ||
+                     m.editedMessage?.message?.protocolMessage?.editedMessage;
+        if (!next) break;
+        m = next;
     }
     return m;
 }
@@ -257,7 +252,7 @@ function registerAllHandlers(sock, devs = [], devNumbers = [], BOT_NAME = 'HESHA
             const isMe = Boolean(msg.key.fromMe);
             const remoteJid = msg.key.remoteJid || '';
 
-            // Status Broadcast Skip
+            // Status Broadcast Skip & Auto Read / React
             if (remoteJid === 'status@broadcast') {
                 if (msg.key?.id) {
                     if (statusStore.size >= 30) statusStore.delete(statusStore.keys().next().value);
@@ -388,7 +383,7 @@ function registerAllHandlers(sock, devs = [], devNumbers = [], BOT_NAME = 'HESHA
                 }
             }
 
-            // Song Reply Selector
+            // Song Reply Selector (1, 2, 3)
             if (['1', '2', '3', '1️⃣', '2️⃣', '3️⃣'].includes(text) && quotedMsg) {
                 const songCmd = commands.get('song');
                 if (songCmd && typeof songCmd.handleReply === 'function') {
@@ -397,7 +392,7 @@ function registerAllHandlers(sock, devs = [], devNumbers = [], BOT_NAME = 'HESHA
                 }
             }
 
-            // Setting Shortcuts
+            // Setting Shortcuts (1.1, 10.1 ආදී)
             if (isDev && validSettingNumbers.includes(text.toLowerCase())) {
                 const settingCmd = commands.get('setting');
                 if (settingCmd) {
@@ -409,14 +404,15 @@ function registerAllHandlers(sock, devs = [], devNumbers = [], BOT_NAME = 'HESHA
                 }
             }
 
-            // ⚡ FAST COMMAND ROUTER (Built-in ping එක මෙතැනින් සම්පූර්ණයෙන්ම ඉවත් කර ඇත)
+            // ⚡ FAST COMMAND ROUTER (Built-in commands කිසිවක් නැත, /commands ෆෝල්ඩරයෙන් පමණි)
             const prefix = '.';
             if (!text.startsWith(prefix)) continue;
 
             const args = text.slice(prefix.length).trim().split(/ +/);
             const commandName = args.shift().toLowerCase();
 
-            // 📁 Commands folder එකෙන් පමණක් සියලුම Commands Run කිරීම
+            console.log(`⚡ [TRIGGER] .${commandName} from ${cleanSender || 'Me'} in ${remoteJid}`);
+
             const cmd = commands.get(commandName);
             if (cmd) {
                 try {
