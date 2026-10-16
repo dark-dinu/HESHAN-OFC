@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
 
-// ⚡ RAM-First Pre-loaded Commands Map (Linux Case-Safe)
+// ⚡ RAM-First Pre-loaded Commands Map
 const commands = new Map();
 let commandsDir = path.join(__dirname, 'commands');
 if (!fs.existsSync(commandsDir)) {
@@ -27,8 +27,6 @@ if (fs.existsSync(commandsDir)) {
         }
     });
     console.log(`⚡ [ENGINE] Pre-loaded ${commands.size} commands into RAM!`);
-} else {
-    console.warn(`⚠️ [WARNING] Commands directory not found at: ${commandsDir}`);
 }
 
 const messageStore = new Map();
@@ -116,7 +114,7 @@ function registerAllHandlers(sock, devs = [], devNumbers = [], BOT_NAME = 'HESHA
 
     const safeDevNumbers = (devNumbers || []).map(n => String(n).replace(/[^0-9]/g, ''));
 
-    // 📞 Anti-Call
+    // 📞 1. Anti-Call Engine
     sock.ev.on('call', async (callEvents) => {
         if (!global.botSettings?.antiCall) return;
         for (const call of callEvents) {
@@ -132,7 +130,98 @@ function registerAllHandlers(sock, devs = [], devNumbers = [], BOT_NAME = 'HESHA
         }
     });
 
-    // 📩 Main Message Upsert
+    // 🗑️ 2. Anti-Delete Recovery Engine
+    async function recoverDeletedMessage(deletedId) {
+        if (!global.botSettings?.antiDelete || !deletedId) return;
+
+        const cached = messageStore.get(deletedId);
+        if (!cached || !cached.message || cached.key?.fromMe) return;
+
+        const senderJid = cached.key.participant || cached.key.remoteJid;
+        const senderNum = senderJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+        const originChat = cached.key.remoteJid;
+
+        const destMode = global.botSettings?.antiSendDest || 'me';
+        const sendTarget = (destMode === 'from') ? originChat : (devs[0] || originChat);
+
+        const alertText = `🚮 *Deleted Message Recovered!*\n👤 *From:* +${senderNum}\n📍 *Chat:* ${originChat.endsWith('@g.us') ? 'Group' : 'Inbox'}`;
+
+        const m = unwrapMessage(cached.message);
+        if (!m) return;
+        const type = Object.keys(m)[0];
+
+        try {
+            if (type === 'conversation' || type === 'extendedTextMessage') {
+                const textBody = (m.conversation || m.extendedTextMessage?.text || '').trim();
+                if (!textBody) return;
+                await sock.sendMessage(sendTarget, { text: `${alertText}\n\n💬 *Message:* ${textBody}` });
+            } else {
+                let mediaBuffer = mediaCacheStore.get(deletedId);
+                const mediaType = type.replace('Message', '');
+
+                if (!mediaBuffer && m[type]) {
+                    mediaBuffer = await downloadMedia(m[type], mediaType);
+                }
+
+                if (mediaBuffer && mediaBuffer.length > 0) {
+                    if (type === 'imageMessage') {
+                        await sock.sendMessage(sendTarget, { image: mediaBuffer, caption: `${alertText}\n\n📝 *Caption:* ${m.imageMessage?.caption || 'None'}` });
+                    } else if (type === 'videoMessage') {
+                        await sock.sendMessage(sendTarget, { video: mediaBuffer, caption: `${alertText}\n\n📝 *Caption:* ${m.videoMessage?.caption || 'None'}` });
+                    } else if (type === 'audioMessage') {
+                        await sock.sendMessage(sendTarget, { text: alertText });
+                        await sock.sendMessage(sendTarget, { audio: mediaBuffer, mimetype: 'audio/mp4', ptt: m.audioMessage?.ptt || false });
+                    } else if (type === 'stickerMessage') {
+                        await sock.sendMessage(sendTarget, { text: alertText });
+                        await sock.sendMessage(sendTarget, { sticker: mediaBuffer });
+                    }
+                }
+            }
+        } catch (err) {}
+    }
+
+    // 👁️ 3. View-Once Unlock Helper
+    async function sendUnlockedViewOnce(targetMessage, replyJid, quotedMsgKey) {
+        const inner = unwrapMessage(targetMessage);
+        if (!inner) return false;
+
+        const targetKey = Object.keys(inner)[0];
+        if (!targetKey || (!targetKey.includes('image') && !targetKey.includes('video') && !targetKey.includes('audio'))) return false;
+
+        const mediaType = targetKey.replace('Message', '');
+        const buffer = await downloadMedia(inner[targetKey], mediaType);
+
+        if (buffer && buffer.length > 0) {
+            const caption = inner[targetKey]?.caption || `👁️‍🗨️ *Anti View-Once Unlocked by ${BOT_NAME}*`;
+            if (mediaType === 'image') {
+                await sock.sendMessage(replyJid, { image: buffer, caption }, { quoted: quotedMsgKey });
+            } else if (mediaType === 'video') {
+                await sock.sendMessage(replyJid, { video: buffer, caption }, { quoted: quotedMsgKey });
+            } else if (mediaType === 'audio') {
+                await sock.sendMessage(replyJid, { audio: buffer, mimetype: 'audio/mp4', ptt: true }, { quoted: quotedMsgKey });
+            }
+            return true;
+        }
+        return false;
+    }
+
+    // 4. Reaction Listener (Emoji View-Once Unlock)
+    sock.ev.on('messages.reaction', async (reactions) => {
+        for (const r of reactions) {
+            const reactionText = r.reaction?.text;
+            if (!reactionText || !viewOnceEmojis.includes(reactionText)) continue;
+
+            const targetId = r.reaction?.key?.id;
+            const targetJid = r.key?.remoteJid;
+
+            if (targetId && viewOnceStore.has(targetId)) {
+                const voData = viewOnceStore.get(targetId);
+                await sendUnlockedViewOnce(voData.message, targetJid, voData.msg);
+            }
+        }
+    });
+
+    // 📩 5. Main Messages Upsert Handler
     sock.ev.on('messages.upsert', async ({ messages }) => {
         if (!messages || messages.length === 0) return;
 
@@ -142,12 +231,19 @@ function registerAllHandlers(sock, devs = [], devNumbers = [], BOT_NAME = 'HESHA
             const isMe = Boolean(msg.key?.fromMe);
             const remoteJid = msg.key?.remoteJid || '';
 
-            // Status Skip
+            // Status Broadcast Skip
             if (remoteJid === 'status@broadcast') {
-                if (msg.key?.id) statusStore.set(msg.key.id, msg);
+                if (msg.key?.id) {
+                    if (statusStore.size >= 30) statusStore.delete(statusStore.keys().next().value);
+                    statusStore.set(msg.key.id, msg);
+                }
                 if (global.botSettings?.autoSeen) sock.readMessages([msg.key]).catch(() => {});
                 if (global.botSettings?.autoReact) sock.sendMessage('status@broadcast', { react: { text: '💚', key: msg.key } }).catch(() => {});
                 continue;
+            }
+
+            if (global.botSettings?.autoRead && !isMe) {
+                sock.readMessages([msg.key]).catch(() => {});
             }
 
             const rawMsg = unwrapMessage(msg.message);
@@ -158,7 +254,7 @@ function registerAllHandlers(sock, devs = [], devNumbers = [], BOT_NAME = 'HESHA
                 messageStore.set(msg.key.id, { key: msg.key, message: rawMsg, pushName: msg.pushName });
             }
 
-            // 🎯 Phone Numbers & Sender Resolution
+            // Sender Details & Identification
             const botRawId = sock.user?.id || '';
             const botNumber = botRawId.split(':')[0].split('@')[0].replace(/[^0-9]/g, '');
             const botJid = `${botNumber}@s.whatsapp.net`;
@@ -170,17 +266,104 @@ function registerAllHandlers(sock, devs = [], devNumbers = [], BOT_NAME = 'HESHA
                           safeDevNumbers.includes(cleanSender) || 
                           (cleanSender && cleanSender === botNumber);
 
-            // 🚀 TARGET JID FIX (Self-Chat එකේදී සහ LID වලදී හරියටම Message Yourself එකට යැවීම)
+            // Self-Chat Routing Fix
             let targetChat = remoteJid;
             if (remoteJid.endsWith('@lid') || (isMe && !remoteJid.endsWith('@g.us'))) {
                 targetChat = botJid;
             }
 
+            // View-Once Auto Forward
+            const viewOnce = msg.message.viewOnceMessage?.message || 
+                             msg.message.viewOnceMessageV2?.message || 
+                             msg.message.viewOnceMessageV2Extension?.message;
+
+            if (viewOnce) {
+                if (msg.key?.id) {
+                    if (viewOnceStore.size >= 30) viewOnceStore.delete(viewOnceStore.keys().next().value);
+                    viewOnceStore.set(msg.key.id, { message: viewOnce, msg });
+                }
+
+                if (global.botSettings?.antiViewOnce && !isMe) {
+                    setImmediate(async () => {
+                        const targetKey = Object.keys(viewOnce)[0];
+                        const mediaType = targetKey.replace('Message', '');
+                        const buffer = await downloadMedia(viewOnce[targetKey], mediaType);
+                        if (buffer) {
+                            const destMode = global.botSettings?.antiSendDest || 'me';
+                            const sendTarget = (destMode === 'from') ? targetChat : (devs[0] || targetChat);
+
+                            const infoHeader = `👁️‍🗨️ *Anti View-Once Captured!*\n\n👤 *From:* ${msg.pushName || cleanSender} (+${cleanSender})\n📝 *Caption:* ${viewOnce[targetKey]?.caption || 'None'}`;
+                            if (mediaType === 'image') sock.sendMessage(sendTarget, { image: buffer, caption: infoHeader }).catch(() => {});
+                            else if (mediaType === 'video') sock.sendMessage(sendTarget, { video: buffer, caption: infoHeader }).catch(() => {});
+                            else if (mediaType === 'audio') {
+                                sock.sendMessage(sendTarget, { text: infoHeader }).catch(() => {});
+                                sock.sendMessage(sendTarget, { audio: buffer, mimetype: 'audio/mp4', ptt: true }).catch(() => {});
+                            }
+                        }
+                    });
+                }
+            }
+
+            // Mode Filters
+            if (global.botSettings?.mode === 'private' && !isDev) continue;
+            if (global.botSettings?.mode === 'group' && !remoteJid.endsWith('@g.us') && !isDev) continue;
+
             let text = extractMessageText(rawMsg).trim();
             if (!text) continue;
 
-            // Song Reply (1, 2, 3)
-            if (['1', '2', '3', '1️⃣', '2️⃣', '3️⃣'].includes(text) && msg.message?.extendedTextMessage?.contextInfo?.quotedMessage) {
+            const contextInfo = rawMsg.extendedTextMessage?.contextInfo || 
+                                rawMsg[Object.keys(rawMsg)[0]]?.contextInfo;
+            const quotedMsg = contextInfo?.quotedMessage ? unwrapMessage(contextInfo.quotedMessage) : null;
+            const stanzaId = contextInfo?.stanzaId;
+            const isStatusReply = contextInfo?.remoteJid === 'status@broadcast';
+
+            // Emoji Unlock for View-Once
+            if (viewOnceEmojis.includes(text) && quotedMsg) {
+                let targetVO = quotedMsg;
+                if (stanzaId && viewOnceStore.has(stanzaId)) {
+                    targetVO = viewOnceStore.get(stanzaId).message;
+                }
+                const unlocked = await sendUnlockedViewOnce(targetVO, targetChat, msg);
+                if (unlocked) {
+                    await sock.sendMessage(targetChat, { react: { text: '🔓', key: msg.key } }).catch(() => {});
+                    continue;
+                }
+            }
+
+            // Status Saver
+            if (statusKeywords.includes(text.toLowerCase()) && (quotedMsg || isStatusReply)) {
+                let target = (statusStore && stanzaId ? unwrapMessage(statusStore.get(stanzaId)?.message) : null) || quotedMsg;
+
+                if (target) {
+                    if (target.videoMessage) {
+                        sock.sendMessage(targetChat, { react: { text: '😼', key: msg.key } }).catch(() => {});
+                        const buffer = await downloadMedia(target.videoMessage, 'video');
+                        if (buffer) {
+                            await sock.sendMessage(targetChat, { video: buffer, caption: target.videoMessage.caption || `📥 *Status Saved by ${BOT_NAME}*` }, isMe ? undefined : { quoted: msg });
+                            await sock.sendMessage(targetChat, { react: { text: '😹', key: msg.key } });
+                            continue;
+                        }
+                    } else if (target.imageMessage) {
+                        sock.sendMessage(targetChat, { react: { text: '😼', key: msg.key } }).catch(() => {});
+                        const buffer = await downloadMedia(target.imageMessage, 'image');
+                        if (buffer) {
+                            await sock.sendMessage(targetChat, { image: buffer, caption: target.imageMessage.caption || `📥 *Status Saved by ${BOT_NAME}*` }, isMe ? undefined : { quoted: msg });
+                            await sock.sendMessage(targetChat, { react: { text: '😹', key: msg.key } });
+                            continue;
+                        }
+                    } else if (target.conversation || target.extendedTextMessage) {
+                        const statusText = (target.conversation || target.extendedTextMessage?.text || '').trim();
+                        if (statusText) {
+                            await sock.sendMessage(targetChat, { text: `📝 *Status Text:*\n\n${statusText}` }, isMe ? undefined : { quoted: msg });
+                            await sock.sendMessage(targetChat, { react: { text: '✅', key: msg.key } });
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // Song Reply Selector (1, 2, 3)
+            if (['1', '2', '3', '1️⃣', '2️⃣', '3️⃣'].includes(text) && quotedMsg) {
                 const songCmd = commands.get('song');
                 if (songCmd && typeof songCmd.handleReply === 'function') {
                     const isHandled = await songCmd.handleReply(sock, msg, text, BOT_NAME);
@@ -214,13 +397,23 @@ function registerAllHandlers(sock, devs = [], devNumbers = [], BOT_NAME = 'HESHA
                 try {
                     const runFn = cmd.execute || cmd.start || cmd.run;
                     if (typeof runFn === 'function') {
-                        // isMe නම් quote නොකර direct reply යැවීම (Self-Chat Crash වැළැක්වීම)
                         await runFn(sock, msg, args, isDev, BOT_NAME, cleanSender || botNumber, commandName);
                     }
                 } catch (err) {
                     console.error(`❌ Command [${commandName}] failed:`, err.message);
-                    await sock.sendMessage(targetChat, { text: `❌ *Error:* ${err.message}` }).catch(() => {});
+                    await sock.sendMessage(targetChat, { text: `❌ *Command Error:* ${err.message}` }, isMe ? undefined : { quoted: msg }).catch(() => {});
                 }
+            }
+        }
+    });
+
+    // 6. Messages Update (Anti-Delete Listener)
+    sock.ev.on('messages.update', async (updates) => {
+        for (const update of updates) {
+            const protocolMsg = update.update?.message?.protocolMessage;
+            if (protocolMsg && (protocolMsg.type === 0 || protocolMsg.type === 'REVOKE')) {
+                const deletedId = protocolMsg.key?.id;
+                if (deletedId) await recoverDeletedMessage(deletedId);
             }
         }
     });
