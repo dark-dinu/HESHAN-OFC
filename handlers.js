@@ -1,6 +1,5 @@
 const fs = require('fs');
 const path = require('path');
-const { performance } = require('perf_hooks');
 const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
 
 // ⚡ RAM-First Pre-loaded Commands Map (Linux Case-Safe)
@@ -14,17 +13,22 @@ if (fs.existsSync(commandsDir)) {
     fs.readdirSync(commandsDir).forEach(file => {
         if (file.endsWith('.js')) {
             try {
-                const cmd = require(path.join(commandsDir, file));
-                if (cmd.name) commands.set(cmd.name.toLowerCase(), cmd);
+                const filePath = path.join(commandsDir, file);
+                delete require.cache[require.resolve(filePath)];
+                const cmd = require(filePath);
+                const name = cmd.name || cmd.pattern || cmd.cmd;
+                if (name) commands.set(name.toLowerCase(), cmd);
                 if (cmd.aliases && Array.isArray(cmd.aliases)) {
                     cmd.aliases.forEach(alias => commands.set(alias.toLowerCase(), cmd));
                 }
             } catch (e) {
-                console.error(`Failed to preload [${file}]:`, e.message);
+                console.error(`❌ Failed to preload [${file}]:`, e.message);
             }
         }
     });
     console.log(`⚡ [ENGINE] Pre-loaded ${commands.size} commands into RAM!`);
+} else {
+    console.warn(`⚠️ [WARNING] Commands directory not found at: ${commandsDir}`);
 }
 
 // 🛡️ High-Performance Memory Stores
@@ -35,13 +39,12 @@ const statusStore = new Map();
 const processedMessageIds = new Set();
 
 const MAX_MSG_STORE = 300;
-const MAX_MEDIA_STORE = 10;
 
 // ⚡ Low-Memory Buffer Downloader
 async function downloadMedia(content, type) {
     try {
         if (!content) return null;
-        if (content.fileLength && Number(content.fileLength) > 8 * 1024 * 1024) return null;
+        if (content.fileLength && Number(content.fileLength) > 15 * 1024 * 1024) return null;
 
         const stream = await downloadContentFromMessage(content, type);
         let buffer = Buffer.from([]);
@@ -52,7 +55,7 @@ async function downloadMedia(content, type) {
     }
 }
 
-// 🛡️ Universal Message Unwrapper (deviceSentMessage ඇතුළු සියල්ල Unpack කරයි)
+// 🛡️ Universal Message Unwrapper
 function unwrapMessage(msg) {
     let m = msg;
     if (!m) return null;
@@ -83,6 +86,9 @@ function extractMessageText(m) {
            m.imageMessage?.caption || 
            m.videoMessage?.caption || 
            m.documentMessage?.caption || 
+           m.buttonsResponseMessage?.selectedButtonId ||
+           m.listResponseMessage?.singleSelectReply?.selectedRowId ||
+           m.templateButtonReplyMessage?.selectedId ||
            '';
 }
 
@@ -113,7 +119,9 @@ const validSettingNumbers = [
 
 const ANTI_CALL_AUDIO = 'https://files.catbox.moe/osl5lm.ogg';
 
-function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
+function registerAllHandlers(sock, devs = [], devNumbers = [], BOT_NAME = 'HESHAN OFC') {
+
+    const safeDevNumbers = (devNumbers || []).map(n => String(n).replace(/[^0-9]/g, ''));
 
     // 📞 1. Anti-Call Engine
     sock.ev.on('call', async (callEvents) => {
@@ -124,7 +132,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
                 const callerJid = call.from;
                 const cleanCaller = callerJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
 
-                if (devNumbers.includes(cleanCaller) || devs.includes(callerJid)) continue;
+                if (safeDevNumbers.includes(cleanCaller) || devs.includes(callerJid)) continue;
 
                 try {
                     await sock.rejectCall(call.id, call.from);
@@ -150,7 +158,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
         const originChat = cached.key.remoteJid;
 
         const destMode = global.botSettings?.antiSendDest || 'me';
-        const sendTarget = (destMode === 'from') ? originChat : devs[0];
+        const sendTarget = (destMode === 'from') ? originChat : (devs[0] || originChat);
 
         const alertText = `🚮 *Deleted Message Recovered!*\n👤 *From:* +${senderNum}\n📍 *Chat:* ${originChat.endsWith('@g.us') ? 'Group' : 'Inbox'}`;
 
@@ -202,11 +210,11 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
         if (buffer && buffer.length > 0) {
             const caption = inner[targetKey]?.caption || `👁️‍🗨️ *Anti View-Once Unlocked by ${BOT_NAME}*`;
             if (mediaType === 'image') {
-                await sock.sendMessage(replyJid, { image: buffer, caption });
+                await sock.sendMessage(replyJid, { image: buffer, caption }, { quoted: quotedMsgKey });
             } else if (mediaType === 'video') {
-                await sock.sendMessage(replyJid, { video: buffer, caption });
+                await sock.sendMessage(replyJid, { video: buffer, caption }, { quoted: quotedMsgKey });
             } else if (mediaType === 'audio') {
-                await sock.sendMessage(replyJid, { audio: buffer, mimetype: 'audio/mp4', ptt: true });
+                await sock.sendMessage(replyJid, { audio: buffer, mimetype: 'audio/mp4', ptt: true }, { quoted: quotedMsgKey });
             }
             return true;
         }
@@ -229,7 +237,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
         }
     });
 
-    // 📩 5. Universal Messages Upsert Handler
+    // 📩 5. Main Messages Upsert Handler
     sock.ev.on('messages.upsert', async ({ messages }) => {
         if (!messages || messages.length === 0) return;
 
@@ -240,34 +248,16 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
             if (msgId) {
                 if (processedMessageIds.has(msgId)) continue;
                 processedMessageIds.add(msgId);
-                if (processedMessageIds.size > 200) {
+                if (processedMessageIds.size > 300) {
                     const first = processedMessageIds.values().next().value;
                     processedMessageIds.delete(first);
                 }
             }
 
             const isMe = Boolean(msg.key.fromMe);
-            let remoteJid = msg.key.remoteJid || '';
+            const remoteJid = msg.key.remoteJid || '';
 
-            // BOT Phone JID එක ලබා ගැනීම
-            const botNumber = sock.user?.id ? sock.user.id.split(':')[0].split('@')[0].replace(/[^0-9]/g, '') : '';
-            const botJid = botNumber ? `${botNumber}@s.whatsapp.net` : devs[0];
-
-            // Self-Chat (@lid) එකක් නම් botJid එකට Map කිරීම
-            let targetReplyJid = remoteJid;
-            if (remoteJid.includes('@lid') || (isMe && !remoteJid.endsWith('@g.us'))) {
-                targetReplyJid = botJid;
-            }
-
-            // Protocol Revoke (Anti-delete)
-            const protocolMsg = msg.message.protocolMessage;
-            if (protocolMsg && (protocolMsg.type === 0 || protocolMsg.type === 'REVOKE')) {
-                const deletedId = protocolMsg.key?.id;
-                if (deletedId) await recoverDeletedMessage(deletedId);
-                continue;
-            }
-
-            // Status Broadcast
+            // Status Broadcast Skip
             if (remoteJid === 'status@broadcast') {
                 if (msg.key?.id) {
                     if (statusStore.size >= 30) statusStore.delete(statusStore.keys().next().value);
@@ -287,23 +277,26 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
             const rawMsg = unwrapMessage(msg.message);
             if (!rawMsg) continue;
 
-            // Cache for Anti-Delete & E2EE Retry
+            // Cache for Anti-Delete & E2EE Pre-key
             if (msg.key?.id) {
                 if (messageStore.size >= MAX_MSG_STORE) messageStore.delete(messageStore.keys().next().value);
                 messageStore.set(msg.key.id, { key: msg.key, message: rawMsg, pushName: msg.pushName });
             }
 
-            const rawSender = isMe 
-                ? botJid 
-                : (msg.key.participant || msg.participant || remoteJid);
+            // Sender Details & Identification
+            const botRawId = sock.user?.id || '';
+            const botNumber = botRawId.split(':')[0].split('@')[0].replace(/[^0-9]/g, '');
+            const rawSender = isMe ? botRawId : (msg.key.participant || msg.participant || remoteJid);
             const cleanSender = rawSender ? rawSender.split(':')[0].split('@')[0].replace(/[^0-9]/g, '') : '';
             const cleanJid = cleanSender ? `${cleanSender}@s.whatsapp.net` : '';
 
             const isDev = isMe || 
-                          devNumbers.includes(cleanSender) || 
+                          safeDevNumbers.includes(cleanSender) || 
                           devs.includes(cleanJid) ||
                           devs.includes(rawSender) ||
                           (cleanSender && cleanSender === botNumber);
+
+            const targetChat = remoteJid;
 
             // View-Once Auto Forward
             const viewOnce = msg.message.viewOnceMessage?.message || 
@@ -323,7 +316,7 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
                         const buffer = await downloadMedia(viewOnce[targetKey], mediaType);
                         if (buffer) {
                             const destMode = global.botSettings?.antiSendDest || 'me';
-                            const sendTarget = (destMode === 'from') ? targetReplyJid : devs[0];
+                            const sendTarget = (destMode === 'from') ? targetChat : (devs[0] || targetChat);
 
                             const infoHeader = `👁️‍🗨️ *Anti View-Once Captured!*\n\n👤 *From:* ${msg.pushName || cleanSender} (+${cleanSender})\n📝 *Caption:* ${viewOnce[targetKey]?.caption || 'None'}`;
                             if (mediaType === 'image') sock.sendMessage(sendTarget, { image: buffer, caption: infoHeader }).catch(() => {});
@@ -350,52 +343,52 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
             const stanzaId = contextInfo?.stanzaId;
             const isStatusReply = contextInfo?.remoteJid === 'status@broadcast';
 
-            // 1. Emoji Unlock for View-Once
+            // Emoji Unlock for View-Once
             if (viewOnceEmojis.includes(text) && quotedMsg) {
                 let targetVO = quotedMsg;
                 if (stanzaId && viewOnceStore.has(stanzaId)) {
                     targetVO = viewOnceStore.get(stanzaId).message;
                 }
-                const unlocked = await sendUnlockedViewOnce(targetVO, targetReplyJid, msg);
+                const unlocked = await sendUnlockedViewOnce(targetVO, targetChat, msg);
                 if (unlocked) {
-                    await sock.sendMessage(targetReplyJid, { react: { text: '🔓', key: msg.key } }).catch(() => {});
+                    await sock.sendMessage(targetChat, { react: { text: '🔓', key: msg.key } }).catch(() => {});
                     continue;
                 }
             }
 
-            // 2. Status Saver
+            // Status Saver
             if (statusKeywords.includes(text.toLowerCase()) && (quotedMsg || isStatusReply)) {
                 let target = (statusStore && stanzaId ? unwrapMessage(statusStore.get(stanzaId)?.message) : null) || quotedMsg;
 
                 if (target) {
                     if (target.videoMessage) {
-                        sock.sendMessage(targetReplyJid, { react: { text: '😼', key: msg.key } }).catch(() => {});
+                        sock.sendMessage(targetChat, { react: { text: '😼', key: msg.key } }).catch(() => {});
                         const buffer = await downloadMedia(target.videoMessage, 'video');
                         if (buffer) {
-                            await sock.sendMessage(targetReplyJid, { video: buffer, caption: target.videoMessage.caption || `📥 *Status Saved by ${BOT_NAME}*` });
-                            await sock.sendMessage(targetReplyJid, { react: { text: '😹', key: msg.key } });
+                            await sock.sendMessage(targetChat, { video: buffer, caption: target.videoMessage.caption || `📥 *Status Saved by ${BOT_NAME}*` }, { quoted: msg });
+                            await sock.sendMessage(targetChat, { react: { text: '😹', key: msg.key } });
                             continue;
                         }
                     } else if (target.imageMessage) {
-                        sock.sendMessage(targetReplyJid, { react: { text: '😼', key: msg.key } }).catch(() => {});
+                        sock.sendMessage(targetChat, { react: { text: '😼', key: msg.key } }).catch(() => {});
                         const buffer = await downloadMedia(target.imageMessage, 'image');
                         if (buffer) {
-                            await sock.sendMessage(targetReplyJid, { image: buffer, caption: target.imageMessage.caption || `📥 *Status Saved by ${BOT_NAME}*` });
-                            await sock.sendMessage(targetReplyJid, { react: { text: '😹', key: msg.key } });
+                            await sock.sendMessage(targetChat, { image: buffer, caption: target.imageMessage.caption || `📥 *Status Saved by ${BOT_NAME}*` }, { quoted: msg });
+                            await sock.sendMessage(targetChat, { react: { text: '😹', key: msg.key } });
                             continue;
                         }
                     } else if (target.conversation || target.extendedTextMessage) {
                         const statusText = (target.conversation || target.extendedTextMessage?.text || '').trim();
                         if (statusText) {
-                            await sock.sendMessage(targetReplyJid, { text: `📝 *Status Text:*\n\n${statusText}` });
-                            await sock.sendMessage(targetReplyJid, { react: { text: '✅', key: msg.key } });
+                            await sock.sendMessage(targetChat, { text: `📝 *Status Text:*\n\n${statusText}` }, { quoted: msg });
+                            await sock.sendMessage(targetChat, { react: { text: '✅', key: msg.key } });
                             continue;
                         }
                     }
                 }
             }
 
-            // 3. Song Reply Selector (1, 2, 3)
+            // Song Reply Selector
             if (['1', '2', '3', '1️⃣', '2️⃣', '3️⃣'].includes(text) && quotedMsg) {
                 const songCmd = commands.get('song');
                 if (songCmd && typeof songCmd.handleReply === 'function') {
@@ -404,74 +397,38 @@ function registerAllHandlers(sock, devs, devNumbers, BOT_NAME, botNum = 1) {
                 }
             }
 
-            // 4. Setting Shortcuts (1.1, 10.1 ආදී)
+            // Setting Shortcuts
             if (isDev && validSettingNumbers.includes(text.toLowerCase())) {
                 const settingCmd = commands.get('setting');
                 if (settingCmd) {
-                    settingCmd.execute(sock, msg, [text], isDev, BOT_NAME, cleanSender || botNumber).catch(() => {});
-                    continue;
+                    const runFn = settingCmd.execute || settingCmd.start || settingCmd.run;
+                    if (typeof runFn === 'function') {
+                        runFn(sock, msg, [text], isDev, BOT_NAME, cleanSender || botNumber).catch(() => {});
+                        continue;
+                    }
                 }
             }
 
-            // ⚡ UNIVERSAL COMMAND ROUTER (Prefix . හෝ නැතිව දෙකෙන්ම)
-            let cleanCommand = text;
-            if (/^[.!#]/.test(cleanCommand)) {
-                cleanCommand = cleanCommand.slice(1).trim();
-            }
+            // ⚡ FAST COMMAND ROUTER (Built-in ping එක මෙතැනින් සම්පූර්ණයෙන්ම ඉවත් කර ඇත)
+            const prefix = '.';
+            if (!text.startsWith(prefix)) continue;
 
-            const args = cleanCommand.split(/ +/);
+            const args = text.slice(prefix.length).trim().split(/ +/);
             const commandName = args.shift().toLowerCase();
 
-            // 🚀 Built-in Zero-Failure Ping
-            if (commandName === 'ping' || commandName === 'p' || commandName === 'speed') {
-                const start = performance.now();
-                await sock.sendPresenceUpdate('composing', targetReplyJid).catch(() => {});
-                const end = performance.now();
-                const latency = Math.max(1, Math.round(end - start));
-                sock.sendPresenceUpdate('paused', targetReplyJid).catch(() => {});
-
-                sock.sendMessage(targetReplyJid, { react: { text: '⚡', key: msg.key } }).catch(() => {});
-                
-                // Pure Unquoted Dispatch (WhatsApp 'Waiting for this message' හිරවීම 100% වළක්වයි)
-                await sock.sendMessage(targetReplyJid, { 
-                    text: `*✗ ${BOT_NAME} [Instance #${botNum}] ❬${latency}𝘮𝘴❭ 📍*` 
-                });
-                console.log(`✅ [BOT #${botNum}] .ping responded (${latency}ms)`);
-                continue;
-            }
-
-            // 🚀 Built-in Zero-Failure Alive
-            if (commandName === 'alive' || commandName === 'bot' || commandName === 'info') {
-                sock.sendMessage(targetReplyJid, { react: { text: '👤', key: msg.key } }).catch(() => {});
-                const aliveText = `👨🏻‍💻⃝➥❬ ʜᴇꜱʜᴀɴ ᴏꜰᴄ ❭\n\n> *➥ɴᴀᴍᴇ ◅◇▻ ${BOT_NAME} 👑*\n> *➥ɪɴꜱᴛᴀɴᴄᴇ ◅◇▻ #${botNum} ⚡*\n> *➥ꜰʀᴏᴍ ◅◇▻ 𝐄𝐌𝐁𝐈𝐋𝐈𝐏𝐈𝐓𝐈𝐘𝐀 ☘️*\n> *➥ᴀɢᴇ   ◅◇▻ 18 📍*\n> *➥ɢᴇɴᴅᴇʀ ◅◇▻ 𝐁𝐎𝐘 👤*\n\n> *❬“Talk is cheap. I write code that speaks for itself.”❭*\n\n*© ${BOT_NAME} 2026 𝐔𝐏𝐃𝐀𝐓𝐄 ❄️*`;
-
-                const logoPath = path.join(__dirname, 'logo.jpg');
-                if (fs.existsSync(logoPath)) {
-                    await sock.sendMessage(targetReplyJid, { image: fs.readFileSync(logoPath), caption: aliveText });
-                } else {
-                    await sock.sendMessage(targetReplyJid, { text: aliveText });
-                }
-                console.log(`✅ [BOT #${botNum}] .alive responded!`);
-                continue;
-            }
-
-            // 🚀 Built-in Setting Menu
-            if (commandName === 'setting' || commandName === 'settings' || commandName === 'config') {
-                const current = global.botSettings || {};
-                const status = (val) => val ? '✔️' : '❌';
-                const menu = `⚙️⃝┅┅┅┅┅┅┅┅┅◇\n┃ *ꜱᴇᴛᴛɪɴɢ* [Instance #${botNum}]\n\n1️⃣ *STATUS SEEN:* [${status(current.autoSeen)}]\n2️⃣ *MODE:* [${(current.mode || 'PUBLIC').toUpperCase()}]\n3️⃣ *ANTI CALL:* [${status(current.antiCall)}]\n4️⃣ *ANTI DELETE:* [${status(current.antiDelete)}]\n5️⃣ *ALWAYS ONLINE:* [${status(current.alwaysOnline)}]\n\n> *❬ ${BOT_NAME} 𝐒𝐄𝐓𝐓𝐈𝐍𝐆 🛠️ ❭*`;
-                await sock.sendMessage(targetReplyJid, { text: menu });
-                continue;
-            }
-
-            // Dynamic Commands Execution from /commands folder
+            // 📁 Commands folder එකෙන් පමණක් සියලුම Commands Run කිරීම
             const cmd = commands.get(commandName);
             if (cmd) {
                 try {
-                    console.log(`⚡ [BOT #${botNum}] Executing .${commandName} from ${cleanSender || 'Owner'}`);
-                    await cmd.execute(sock, msg, args, isDev, BOT_NAME, cleanSender || botNumber, commandName);
+                    const runFn = cmd.execute || cmd.start || cmd.run;
+                    if (typeof runFn === 'function') {
+                        await runFn(sock, msg, args, isDev, BOT_NAME, cleanSender || botNumber, commandName);
+                    } else {
+                        console.error(`⚠️ Command [${commandName}] has no valid execute/start/run function.`);
+                    }
                 } catch (err) {
-                    console.error(`Command [${commandName}] failed:`, err.message);
+                    console.error(`❌ Command [${commandName}] failed:`, err.message);
+                    await sock.sendMessage(targetChat, { text: `❌ *Command Error:* ${err.message}` }, { quoted: msg }).catch(() => {});
                 }
             }
         }
