@@ -1,5 +1,7 @@
 const axios = require('axios');
 const ytSearch = require('yt-search');
+const { spawn } = require('child_process');
+const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 
 const API_KEY = process.env.CHAMINDU_API_KEY || 'chama_api_ec9848130d1aea209f08fb85e0b4720f';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
@@ -44,6 +46,34 @@ async function getAudioDownloadUrl(videoUrl) {
         } catch {}
     }
     return null;
+}
+
+// ── In-Memory MP3 to Opus/OGG PTT Converter ──
+function convertToOpus(inputBuffer) {
+    return new Promise((resolve, reject) => {
+        const ffmpeg = spawn(ffmpegPath, [
+            '-i', 'pipe:0',
+            '-vn',
+            '-c:a', 'libopus',
+            '-b:a', '64k',
+            '-vbr', 'on',
+            '-compression_level', '10',
+            '-f', 'ogg',
+            'pipe:1'
+        ]);
+
+        const chunks = [];
+        ffmpeg.stdout.on('data', chunk => chunks.push(chunk));
+        ffmpeg.stderr.on('data', () => {}); // Ignore logs
+        ffmpeg.on('close', code => {
+            if (code === 0) resolve(Buffer.concat(chunks));
+            else reject(new Error(`FFmpeg exited with code ${code}`));
+        });
+        ffmpeg.on('error', err => reject(err));
+
+        ffmpeg.stdin.write(inputBuffer);
+        ffmpeg.stdin.end();
+    });
 }
 
 module.exports = {
@@ -94,7 +124,6 @@ module.exports = {
             return sock.sendMessage(from, { text: '❌ වලංගු WhatsApp Channel Link එකක් ලබාදෙන්න!' }, safeQuote);
         }
 
-        // Reaction එක යැවීම
         sock.sendMessage(from, { react: { text: '⚡', key: msg.key } }).catch(() => {});
 
         try {
@@ -130,7 +159,20 @@ module.exports = {
                 return sock.sendMessage(from, { text: '❌ Audio stream link එක ලබාගැනීමට නොහැකි විය.' }, safeQuote);
             }
 
-            // 4. Card Caption
+            // 4. Download Audio Buffer
+            const audioRes = await axios.get(audioUrl, { responseType: 'arraybuffer', timeout: 30000 });
+            let audioBuffer = Buffer.from(audioRes.data);
+
+            // 5. Convert to Opus Voice Note (PTT compatible)
+            let pttBuffer;
+            try {
+                pttBuffer = await convertToOpus(audioBuffer);
+            } catch (convErr) {
+                console.warn('[CONVERT WARNING]: Opus convert failed, using raw audio buffer.', convErr.message);
+                pttBuffer = audioBuffer;
+            }
+
+            // 6. Card Caption
             const cardCaption = 
 `🥰⃝🎶 *“ ${video.title} ”*
 
@@ -138,9 +180,9 @@ module.exports = {
 
 Use Headphones For Best Experience.... 🧚‍♀️🎵
 
-| ☘️ *${botName}*`;
+| 🙈 *${botName}*`;
 
-            // 5. Channel එකට Thumbnail Card එක යැවීම
+            // 7. Channel එකට Thumbnail Card එක යැවීම
             if (video.thumbnail) {
                 await sock.sendMessage(channelJid, { 
                     image: { url: video.thumbnail }, 
@@ -150,10 +192,10 @@ Use Headphones For Best Experience.... 🧚‍♀️🎵
                 await sock.sendMessage(channelJid, { text: cardCaption });
             }
 
-            // 6. Direct Stream එකෙන් තත්පර 2කින් Voice Note එක Channel එකට යැවීම (Zero RAM & Zero Lag)
+            // 8. Playable Voice Note එක Channel එකට යැවීම
             await sock.sendMessage(channelJid, {
-                audio: { url: audioUrl },
-                mimetype: 'audio/mp4',
+                audio: pttBuffer,
+                mimetype: 'audio/ogg; codecs=opus',
                 ptt: true
             });
 
